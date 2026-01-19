@@ -3,3 +3,4 @@
 examples/*
 *__pycache__*
 INSTRUCTIONS.md
+.claude-flow*
