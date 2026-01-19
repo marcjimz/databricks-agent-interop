@@ -1,0 +1,63 @@
+{
+  "entries": {
+    "mvp-architecture-plan": {
+      "key": "mvp-architecture-plan",
+      "value": {
+        "objective": "Build MVP Databricks App A2A gateway",
+        "structure": {
+          "app/": "FastAPI A2A gateway server",
+          "src/agents/": "Demo agents for deployment",
+          "notebooks/": "Deployment and demo notebooks"
+        },
+        "key_features": [
+          "UC Connection discovery (-a2a suffix)",
+          "OBO authorization via connection access",
+          "Agent Card endpoints",
+          "A2A protocol streaming"
+        ],
+        "status": "planning_complete"
+      },
+      "metadata": {},
+      "storedAt": "2026-01-18T04:42:59.546Z",
+      "accessCount": 0,
+      "lastAccessed": "2026-01-18T04:42:59.546Z"
+    },
+    "mvp-build-complete": {
+      "key": "mvp-build-complete",
+      "value": {
+        "status": "completed",
+        "files_created": [
+          "app/__init__.py",
+          "app/config.py",
+          "app/models.py",
+          "app/discovery.py",
+          "app/authorization.py",
+          "app/main.py",
+          "src/__init__.py",
+          "src/agents/__init__.py",
+          "src/agents/echo_agent.py",
+          "src/agents/calculator_agent.py",
+          "notebooks/01_setup_uc_connections.py",
+          "notebooks/02_demo_agent_interop.py",
+          "app.yaml",
+          "requirements.txt",
+          "src/agents/echo_app.yaml",
+          "src/agents/calculator_app.yaml",
+          "README.md"
+        ],
+        "features": [
+          "UC Connection discovery",
+          "OBO authorization",
+          "Agent proxy with streaming",
+          "Echo agent",
+          "Calculator agent"
+        ]
+      },
+      "metadata": {},
+      "storedAt": "2026-01-18T04:47:51.086Z",
+      "accessCount": 0,
+      "lastAccessed": "2026-01-18T04:47:51.086Z"
+    }
+  },
+  "version": "3.0.0"
+}

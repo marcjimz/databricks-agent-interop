@@ -1,0 +1,43 @@
+bundle:
+  name: a2a-gateway
+
+variables:
+  name_prefix:
+    description: "Prefix for all resource names"
+    default: "marcin"
+  catalog_name:
+    description: "Unity Catalog catalog name"
+    default: "marcin_demo"
+  schema_name:
+    description: "Schema for A2A connections"
+    default: "a2a_demo"
+
+resources:
+  apps:
+    a2a_gateway:
+      name: "${var.name_prefix}-a2a-gateway"
+      description: "A2A Gateway for agent discovery and proxying"
+      source_code_path: ./app
+
+    echo_agent:
+      name: "${var.name_prefix}-echo-agent"
+      description: "Echo Agent for A2A testing"
+      source_code_path: ./src/agents/echo
+
+    calculator_agent:
+      name: "${var.name_prefix}-calculator-agent"
+      description: "Calculator Agent for A2A demo"
+      source_code_path: ./src/agents/calculator
+
+targets:
+  dev:
+    default: true
+    presets:
+      name_prefix: "${var.name_prefix}-"
+    workspace:
+      profile: e2-demo-field-eng
+
+  prod:
+    workspace:
+      profile: e2-demo-field-eng
+    # Use: databricks bundle deploy --target prod -p <profile>

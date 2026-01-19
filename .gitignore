@@ -1,0 +1,5 @@
+*.hive*
+*.claude
+examples/*
+*__pycache__*
+INSTRUCTIONS.md
