@@ -178,7 +178,7 @@ Response (only agents you have UC connection access to):
 ### 3. Call an Agent
 
 ```bash
-curl -X POST "${GATEWAY_URL}/api/agents/echo/message" \
+curl -X POST "${GATEWAY_URL}/api/agents/marcin-echo/message" \
   -H "Authorization: Bearer ${TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{
