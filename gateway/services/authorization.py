@@ -8,14 +8,13 @@ import logging
 from typing import Optional
 from fastapi import Request, HTTPException, status
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.service.catalog import ConnectionInfo, Privilege
 
 from config import settings
 
 logger = logging.getLogger(__name__)
 
 
-class AuthorizationService:
+class AuthService:
     """Handles authorization checks for A2A agent access."""
 
     def __init__(self, workspace_client: Optional[WorkspaceClient] = None):
@@ -77,7 +76,6 @@ class AuthorizationService:
                 return False
 
             # If we can get the connection, user has at least read access
-            # For more granular checks, we could inspect grants
             logger.debug(f"User has access to connection {connection_name}")
             return True
 
@@ -122,12 +120,12 @@ class AuthorizationService:
 
 
 # Global authorization service instance
-_auth_service: Optional[AuthorizationService] = None
+_auth_service: Optional[AuthService] = None
 
 
-def get_auth_service() -> AuthorizationService:
-    """Get the global AuthorizationService instance."""
+def get_auth_service() -> AuthService:
+    """Get the global AuthService instance."""
     global _auth_service
     if _auth_service is None:
-        _auth_service = AuthorizationService()
+        _auth_service = AuthService()
     return _auth_service

@@ -1,6 +1,5 @@
 """Configuration settings for the A2A Gateway."""
 
-import os
 from pydantic_settings import BaseSettings
 
 

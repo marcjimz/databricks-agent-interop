@@ -1,6 +1,6 @@
-"""Pydantic models for the A2A Gateway."""
+"""Agent-related data models."""
 
-from typing import Optional, List
+from typing import Optional
 from pydantic import BaseModel
 
 
@@ -37,27 +37,3 @@ class AgentInfo(BaseModel):
             kwargs["exclude"].add("bearer_token")
             kwargs["exclude"].add("oauth_m2m")
         return super().model_dump(**kwargs)
-
-
-class AgentListResponse(BaseModel):
-    """Response containing list of available agents."""
-    agents: List[AgentInfo]
-    total: int
-
-
-class HealthResponse(BaseModel):
-    """Health check response."""
-    status: str
-    version: str
-
-
-class ProxyRequest(BaseModel):
-    """Request to proxy to an A2A agent."""
-    agent_name: str
-    message: dict
-
-
-class ErrorResponse(BaseModel):
-    """Error response model."""
-    error: str
-    detail: Optional[str] = None

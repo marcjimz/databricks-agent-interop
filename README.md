@@ -8,7 +8,7 @@ For more on AI Agent Protocols, reference the helpful paper: [A Survey of AI Age
 
 ## Architecture
 
-**Gateway** (`app/`) - FastAPI application that:
+**Gateway** (`gateway/`) - FastAPI application that:
 - Discovers agents via UC connections ending with `-a2a`
 - Authorizes using OBO (On-Behalf-Of) to check user's connection access
 - Proxies requests to downstream agents with SSE streaming support
@@ -116,14 +116,32 @@ The gateway automatically acquires and caches OAuth tokens when using M2M creden
 
 ## Usage
 
+First, capture the gateway URL and auth token:
+
+```bash
+# Set your prefix and Databricks host
+PREFIX=marcin
+DATABRICKS_HOST=https://e2-demo-field-eng.cloud.databricks.com/
+
+# Get gateway URL and auth token
+GATEWAY_URL=$(databricks apps get "${PREFIX}-a2a-gateway" --output json | jq -r '.url')
+TOKEN=$(databricks auth token --host "${DATABRICKS_HOST}" | jq -r '.access_token')
+```
+
+> **Note**: If `databricks auth token` prompts for host, ensure you've logged in first:
+> ```bash
+> databricks auth login --host "${DATABRICKS_HOST}"
+> ```
+
 ### 1. Explore the API
 
-Open Swagger UI at `https://<gateway-url>/docs` to interactively test all endpoints.
+Open Swagger UI at `${GATEWAY_URL}/docs` to interactively test all endpoints.
 
 ### 2. Discover Accessible Agents
 
 ```bash
-curl -s https://<gateway-url>/api/agents | jq
+curl -s "${GATEWAY_URL}/api/agents" \
+  -H "Authorization: Bearer ${TOKEN}" | jq
 ```
 
 Response (only agents you have UC connection access to):
@@ -131,20 +149,37 @@ Response (only agents you have UC connection access to):
 {
   "agents": [
     {
-      "name": "echo",
-      "description": "Echo Agent - Returns messages for A2A testing",
-      "url": "https://marcin-echo-agent-xxx.databricksapps.com",
-      "connection_name": "echo-a2a"
+      "name": "marcin-calculator",
+      "description": "Calculator Agent",
+      "agent_card_url": "https://marcin-calculator-agent-1444828305810485.aws.databricksapps.com/.well-known/agent.json",
+      "url": null,
+      "bearer_token": null,
+      "oauth_m2m": null,
+      "connection_name": "marcin-calculator-a2a",
+      "catalog": "main",
+      "schema_name": "default"
+    },
+    {
+      "name": "marcin-echo",
+      "description": "Echo Agent",
+      "agent_card_url": "https://marcin-echo-agent-1444828305810485.aws.databricksapps.com/.well-known/agent.json",
+      "url": null,
+      "bearer_token": null,
+      "oauth_m2m": null,
+      "connection_name": "marcin-echo-a2a",
+      "catalog": "main",
+      "schema_name": "default"
     }
   ],
-  "total": 1
+  "total": 2
 }
 ```
 
 ### 3. Call an Agent
 
 ```bash
-curl -X POST https://<gateway-url>/api/agents/echo/message \
+curl -X POST "${GATEWAY_URL}/api/agents/echo/message" \
+  -H "Authorization: Bearer ${TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -177,8 +212,10 @@ Response:
 If you don't have `USE CONNECTION` privilege:
 
 ```bash
-curl -s https://<gateway-url>/api/agents/calculator/message \
-  -X POST -H "Content-Type: application/json" \
+curl -s "${GATEWAY_URL}/api/agents/calculator/message" \
+  -X POST \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":"1","method":"message/send","params":{...}}'
 ```
 
@@ -207,12 +244,15 @@ An agent can call other agents through the gateway. Configure your agent to use 
 
 ```python
 # In your agent code
+import os
 import httpx
+
+GATEWAY_URL = os.environ.get("GATEWAY_URL", "https://your-gateway.databricksapps.com")
 
 async def call_calculator(expression: str):
     async with httpx.AsyncClient() as client:
         response = await client.post(
-            "https://<gateway-url>/api/agents/calculator/message",
+            f"{GATEWAY_URL}/api/agents/calculator/message",
             json={
                 "jsonrpc": "2.0",
                 "id": "1",

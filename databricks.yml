@@ -17,7 +17,7 @@ resources:
     a2a_gateway:
       name: "${var.name_prefix}-a2a-gateway"
       description: "A2A Gateway for agent discovery and proxying"
-      source_code_path: ./app
+      source_code_path: ./gateway
 
     echo_agent:
       name: "${var.name_prefix}-echo-agent"
