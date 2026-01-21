@@ -34,10 +34,4 @@ targets:
     default: true
     presets:
       name_prefix: "${var.name_prefix}-"
-    workspace:
-      profile: e2-demo-field-eng
-
-  prod:
-    workspace:
-      profile: e2-demo-field-eng
-    # Use: databricks bundle deploy --target prod -p <profile>
+    # Uses default CLI profile. Override with: databricks bundle deploy -p <profile>

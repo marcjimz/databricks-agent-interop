@@ -10,7 +10,7 @@ from fastapi import Request, HTTPException, status
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.catalog import ConnectionInfo, Privilege
 
-from app.config import settings
+from config import settings
 
 logger = logging.getLogger(__name__)
 

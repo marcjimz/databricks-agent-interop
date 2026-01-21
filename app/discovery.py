@@ -9,8 +9,8 @@ from typing import List, Optional
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.catalog import ConnectionInfo
 
-from app.config import settings
-from app.models import AgentInfo
+from config import settings
+from models import AgentInfo
 
 logger = logging.getLogger(__name__)
 
@@ -70,9 +70,7 @@ class AgentDiscovery:
     def connection_to_agent_info(self, conn: ConnectionInfo) -> Optional[AgentInfo]:
         """Convert a UC connection to AgentInfo.
 
-        The connection's options should contain:
-        - url: The agent's A2A endpoint URL
-        - description: Optional description of the agent
+        The connection's URL should point to the agent card JSON.
 
         Args:
             conn: ConnectionInfo from Unity Catalog.
@@ -88,13 +86,12 @@ class AgentDiscovery:
         if agent_name.endswith(settings.a2a_connection_suffix):
             agent_name = agent_name[:-len(settings.a2a_connection_suffix)]
 
-        # Get URL from connection options
-        # The SDK uses 'options' dict for connection configuration
+        # Get agent card URL from connection options
         options = conn.options or {}
-        url = options.get("url", options.get("host", ""))
+        agent_card_url = options.get("url", options.get("host", ""))
 
-        if not url:
-            logger.warning(f"Connection {conn.name} has no URL configured")
+        if not agent_card_url:
+            logger.warning(f"Connection {conn.name} has no agent card URL configured")
             return None
 
         # Parse catalog.schema from full_name or use defaults
@@ -108,8 +105,8 @@ class AgentDiscovery:
 
         return AgentInfo(
             name=agent_name,
-            description=conn.comment or options.get("description"),
-            url=url,
+            description=conn.comment,
+            agent_card_url=agent_card_url,
             connection_name=conn.name,
             catalog=catalog,
             schema_name=schema_name

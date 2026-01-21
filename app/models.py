@@ -8,7 +8,8 @@ class AgentInfo(BaseModel):
     """Information about a discovered A2A agent."""
     name: str
     description: Optional[str] = None
-    url: str
+    agent_card_url: str  # URL to agent card JSON
+    url: Optional[str] = None  # Endpoint URL (from agent card)
     connection_name: str
     catalog: str
     schema_name: str

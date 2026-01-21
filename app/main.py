@@ -10,16 +10,17 @@ import logging
 import time
 import httpx
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Optional, Dict, Any
+from functools import lru_cache
 
 from fastapi import FastAPI, Request, HTTPException, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.config import settings
-from app.models import AgentListResponse, HealthResponse, ErrorResponse, AgentInfo
-from app.discovery import get_discovery
-from app.authorization import get_auth_service
+from config import settings
+from models import AgentListResponse, HealthResponse, ErrorResponse, AgentInfo
+from discovery import get_discovery
+from authorization import get_auth_service
 
 # Configure logging
 logging.basicConfig(
@@ -30,6 +31,9 @@ logger = logging.getLogger(__name__)
 
 # HTTP client for proxying requests
 _http_client: Optional[httpx.AsyncClient] = None
+
+# Agent card cache (agent_card_url -> card data)
+_agent_card_cache: Dict[str, Dict[str, Any]] = {}
 
 
 @asynccontextmanager
@@ -87,8 +91,78 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 
 # =============================================================================
+# Agent Card Fetching
+# =============================================================================
+
+async def fetch_agent_card(agent_card_url: str) -> Dict[str, Any]:
+    """Fetch and cache an agent card from its URL.
+
+    Args:
+        agent_card_url: URL to the agent card JSON.
+
+    Returns:
+        The agent card as a dictionary.
+    """
+    if agent_card_url in _agent_card_cache:
+        return _agent_card_cache[agent_card_url]
+
+    try:
+        response = await _http_client.get(agent_card_url)
+        response.raise_for_status()
+        card = response.json()
+        _agent_card_cache[agent_card_url] = card
+        logger.info(f"Fetched agent card from {agent_card_url}")
+        return card
+    except httpx.HTTPError as e:
+        logger.error(f"Failed to fetch agent card from {agent_card_url}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to fetch agent card: {str(e)}"
+        )
+
+
+async def get_agent_endpoint_url(agent: AgentInfo) -> str:
+    """Get the endpoint URL for an agent by fetching its agent card.
+
+    Args:
+        agent: AgentInfo with agent_card_url.
+
+    Returns:
+        The endpoint URL from the agent card.
+    """
+    card = await fetch_agent_card(agent.agent_card_url)
+    url = card.get("url", "")
+
+    # Handle relative URLs - use agent card URL as base
+    if url.startswith("/"):
+        from urllib.parse import urlparse
+        parsed = urlparse(agent.agent_card_url)
+        url = f"{parsed.scheme}://{parsed.netloc}{url}"
+
+    if not url:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Agent card does not contain a URL"
+        )
+
+    return url
+
+
+# =============================================================================
 # Health & Info Endpoints
 # =============================================================================
+
+@app.get("/", tags=["Health"])
+async def root():
+    """Root endpoint with gateway info."""
+    return {
+        "name": settings.app_name,
+        "version": settings.app_version,
+        "status": "healthy",
+        "docs": "/docs",
+        "agents": "/api/agents"
+    }
+
 
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
 async def health_check():
@@ -183,10 +257,10 @@ async def get_agent(agent_name: str, request: Request):
 
 
 @app.get("/api/agents/{agent_name}/.well-known/agent.json", tags=["A2A"])
-async def get_agent_card(agent_name: str, request: Request):
+async def get_agent_card_endpoint(agent_name: str, request: Request):
     """Get the A2A agent card for a specific agent.
 
-    Proxies to the agent's /.well-known/agent.json endpoint.
+    Fetches from the agent_card_url stored in the UC connection.
     """
     discovery = get_discovery()
     auth_service = get_auth_service()
@@ -200,19 +274,7 @@ async def get_agent_card(agent_name: str, request: Request):
 
     await auth_service.authorize_agent_access(request, agent.connection_name)
 
-    # Proxy to the agent's agent card endpoint
-    agent_card_url = f"{agent.url.rstrip('/')}/.well-known/agent.json"
-
-    try:
-        response = await _http_client.get(agent_card_url)
-        response.raise_for_status()
-        return response.json()
-    except httpx.HTTPError as e:
-        logger.error(f"Failed to fetch agent card from {agent_card_url}: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Failed to fetch agent card: {str(e)}"
-        )
+    return await fetch_agent_card(agent.agent_card_url)
 
 
 # =============================================================================
@@ -223,7 +285,7 @@ async def get_agent_card(agent_name: str, request: Request):
 async def send_message(agent_name: str, request: Request):
     """Send a message to an A2A agent.
 
-    Proxies the JSON-RPC request to the agent's endpoint.
+    Proxies the JSON-RPC request to the agent's endpoint URL (from agent card).
     """
     discovery = get_discovery()
     auth_service = get_auth_service()
@@ -237,12 +299,12 @@ async def send_message(agent_name: str, request: Request):
 
     await auth_service.authorize_agent_access(request, agent.connection_name)
 
+    # Get endpoint URL from agent card
+    agent_url = await get_agent_endpoint_url(agent)
+
     # Get request body
     body = await request.body()
     content_type = request.headers.get("content-type", "application/json")
-
-    # Proxy to agent
-    agent_url = agent.url.rstrip("/")
 
     try:
         response = await _http_client.post(
@@ -280,8 +342,9 @@ async def stream_message(agent_name: str, request: Request):
 
     await auth_service.authorize_agent_access(request, agent.connection_name)
 
+    # Get endpoint URL from agent card
+    agent_url = await get_agent_endpoint_url(agent)
     body = await request.body()
-    agent_url = agent.url.rstrip("/")
 
     async def stream_response():
         try:
@@ -313,7 +376,7 @@ async def stream_message(agent_name: str, request: Request):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
-        "app.main:app",
+        "main:app",
         host=settings.host,
         port=settings.port,
         reload=settings.debug

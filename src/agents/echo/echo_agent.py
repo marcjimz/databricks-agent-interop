@@ -149,6 +149,20 @@ def build_echo_agent_app():
     )
     app = server.build()
 
+    # Add root GET endpoint for browser access
+    from starlette.responses import JSONResponse
+    from starlette.routing import Route
+
+    async def root(request):
+        return JSONResponse({
+            "name": agent_card.name,
+            "version": agent_card.version,
+            "description": agent_card.description,
+            "agent_card": "/.well-known/agent.json"
+        })
+
+    app.routes.insert(0, Route("/", root, methods=["GET"]))
+
     async def _close_httpx():
         await httpx_client.aclose()
     app.add_event_handler("shutdown", _close_httpx)

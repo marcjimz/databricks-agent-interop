@@ -1,20 +1,19 @@
 PREFIX ?= marcin
 BUNDLE_PATH ?= /Workspace/Users/marcin.jimenez@databricks.com/.bundle/a2a-gateway/dev/files
 
-deploy:
-	databricks bundle deploy --force-lock
-	@$(MAKE) -s deploy-app APP=$(PREFIX)-a2a-gateway SRC=$(BUNDLE_PATH)/app
-	@$(MAKE) -s deploy-app APP=$(PREFIX)-echo-agent SRC=$(BUNDLE_PATH)/src/agents/echo
-	@$(MAKE) -s deploy-app APP=$(PREFIX)-calculator-agent SRC=$(BUNDLE_PATH)/src/agents/calculator
+auth:
+	databricks auth login
 
-deploy-app:
-	@state=$$(databricks apps get $(APP) --output json 2>/dev/null | jq -r '.compute_status.state // "UNKNOWN"'); \
-	if [ "$$state" = "STOPPED" ] || [ "$$state" = "ACTIVE" ]; then \
-		echo "Deploying $(APP)..."; \
-		databricks apps deploy $(APP) --source-code-path $(SRC) --no-wait || true; \
-	else \
-		echo "$(APP): $$state (skipping)"; \
-	fi
+deploy:
+	databricks bundle deploy
+	@$(MAKE) -s redeploy
+
+redeploy:
+	@echo "Deploying apps..."
+	@databricks apps deploy $(PREFIX)-a2a-gateway --source-code-path $(BUNDLE_PATH)/app --no-wait >/dev/null 2>&1 || true
+	@databricks apps deploy $(PREFIX)-echo-agent --source-code-path $(BUNDLE_PATH)/src/agents/echo --no-wait >/dev/null 2>&1 || true
+	@databricks apps deploy $(PREFIX)-calculator-agent --source-code-path $(BUNDLE_PATH)/src/agents/calculator --no-wait >/dev/null 2>&1 || true
+	@echo "Done. Run 'make status' to check."
 
 status:
 	@databricks apps get $(PREFIX)-a2a-gateway --output json 2>/dev/null | jq -r '"gateway: \(.compute_status.state) - \(.url)"' || echo "gateway: not found"
@@ -26,7 +25,12 @@ stop:
 	-databricks apps stop $(PREFIX)-echo-agent
 	-databricks apps stop $(PREFIX)-calculator-agent
 
+start:
+	-databricks apps start $(PREFIX)-a2a-gateway --no-wait
+	-databricks apps start $(PREFIX)-echo-agent --no-wait
+	-databricks apps start $(PREFIX)-calculator-agent --no-wait
+
 destroy:
 	databricks bundle destroy --auto-approve
 
-.PHONY: deploy deploy-app status stop destroy
+.PHONY: deploy status stop start destroy auth
