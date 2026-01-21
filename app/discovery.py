@@ -10,7 +10,7 @@ from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.catalog import ConnectionInfo
 
 from config import settings
-from models import AgentInfo
+from models import AgentInfo, OAuthM2MCredentials
 
 logger = logging.getLogger(__name__)
 
@@ -86,13 +86,48 @@ class AgentDiscovery:
         if agent_name.endswith(settings.a2a_connection_suffix):
             agent_name = agent_name[:-len(settings.a2a_connection_suffix)]
 
-        # Get agent card URL from connection options
+        # Get agent card URL and auth from connection options
         options = conn.options or {}
-        agent_card_url = options.get("url", options.get("host", ""))
+        host = options.get("host", "")
+        base_path = options.get("base_path", "")
 
-        if not agent_card_url:
-            logger.warning(f"Connection {conn.name} has no agent card URL configured")
+        if not host:
+            logger.warning(f"Connection {conn.name} has no host configured")
             return None
+
+        if not base_path:
+            logger.warning(f"Connection {conn.name} has no base_path configured")
+            return None
+
+        # Build agent card URL: host + base_path
+        agent_card_url = host.rstrip("/") + base_path
+
+        # Determine auth method from connection options
+        bearer_token = None
+        oauth_m2m = None
+
+        raw_token = options.get("bearer_token", "")
+        client_id = options.get("client_id")
+        client_secret = options.get("client_secret")
+        token_endpoint = options.get("token_endpoint")
+
+        if client_id and client_secret and token_endpoint:
+            # OAuth M2M credentials flow
+            oauth_m2m = OAuthM2MCredentials(
+                client_id=client_id,
+                client_secret=client_secret,
+                token_endpoint=token_endpoint,
+                oauth_scope=options.get("oauth_scope")
+            )
+            logger.info(f"Connection {conn.name} configured with OAuth M2M")
+        elif raw_token and raw_token.lower() == "databricks":
+            # Same-tenant Databricks: pass through caller's Entra ID token
+            bearer_token = None  # Signal for pass-through
+            logger.debug(f"Connection {conn.name} configured for Databricks pass-through auth")
+        elif raw_token and raw_token.lower() not in ("unused", "none", "placeholder", "oauth-passthrough"):
+            # Static bearer token for external agents
+            bearer_token = raw_token
+            logger.debug(f"Connection {conn.name} configured with static bearer token")
 
         # Parse catalog.schema from full_name or use defaults
         catalog = settings.catalog_name
@@ -107,6 +142,8 @@ class AgentDiscovery:
             name=agent_name,
             description=conn.comment,
             agent_card_url=agent_card_url,
+            bearer_token=bearer_token,
+            oauth_m2m=oauth_m2m,
             connection_name=conn.name,
             catalog=catalog,
             schema_name=schema_name

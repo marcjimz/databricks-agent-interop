@@ -1,6 +1,10 @@
 # Databricks A2A Gateway
 
-A2A protocol gateway for Databricks. Discovers agents via UC connections (`*-a2a`), authorizes via connection access.
+An [A2A protocol](https://google.github.io/A2A/) gateway powered by an **Agent Registry** built on Databricks Unity Catalog. The gateway leverages native UC objects (HTTP connections) for agent discovery and access control, enabling seamless interoperability between A2A-compliant agents.
+
+For more on AI Agent Protocols, reference the helpful paper: [A Survey of AI Agent Protocols](https://arxiv.org/pdf/2504.16736)
+
+![AgentProtocols](./static/img/agent_protocols.png)
 
 ## Architecture
 
@@ -25,14 +29,16 @@ A2A protocol gateway for Databricks. Discovers agents via UC connections (`*-a2a
 
 ## Prerequisites
 
+- **Azure Databricks** with Microsoft Entra ID authentication
 - [Databricks CLI](https://docs.databricks.com/dev-tools/cli/install.html) configured with your default profile
 - `make`
 
 ## Deploy
 
 ```bash
+PREFIX=marcin
 make auth
-make deploy PREFIX=<your-prefix>
+make deploy PREFIX=$PREFIX
 make status
 ```
 
@@ -42,31 +48,71 @@ We deployed two example agents as part of this orchestration, governance setup i
 
 **Convention**:
 - Connection name ends with `-a2a` → agent is discoverable by the gateway
-- Connection URL → **agent card URL** (the JSON endpoint, e.g., `/.well-known/agent.json`)
+- `host` = agent base URL (no path)
+- `base_path` = agent card path (e.g., `/.well-known/agent.json`)
 
 ```bash
-# Get agent URLs and construct agent card URLs
-ECHO_CARD=$(databricks apps get ${PREFIX}-echo-agent --output json | jq -r '.url + "/.well-known/agent.json"')
-CALC_CARD=$(databricks apps get ${PREFIX}-calculator-agent --output json | jq -r '.url + "/.well-known/agent.json"')
+# Set your prefix (same as used in make deploy); this is not required for anything other than to avoid duplicates in a workspace. Repeated for consistency.
+# PREFIX=<your-prefix>
 
-# Create UC connections - URL points to agent card JSON
-databricks connections create --name "echo-a2a" --connection-type HTTP \
-  --options "{\"url\": \"${ECHO_CARD}\"}" --comment "Echo Agent"
+# Get agent base URLs
+ECHO_URL=$(databricks apps get "${PREFIX}-echo-agent" --output json | jq -r '.url')
+CALC_URL=$(databricks apps get "${PREFIX}-calculator-agent" --output json | jq -r '.url')
 
-databricks connections create --name "calculator-a2a" --connection-type HTTP \
-  --options "{\"url\": \"${CALC_CARD}\"}" --comment "Calculator Agent"
+# Create UC connections - "databricks" indicates same-tenant Entra ID pass-through
+databricks connections create --json "{
+  \"name\": \"${PREFIX}-echo-a2a\",
+  \"connection_type\": \"HTTP\",
+  \"options\": {\"host\": \"${ECHO_URL}\", \"base_path\": \"/.well-known/agent.json\", \"bearer_token\": \"databricks\"},
+  \"comment\": \"Echo Agent\"
+}"
+
+databricks connections create --json "{
+  \"name\": \"${PREFIX}-calculator-a2a\",
+  \"connection_type\": \"HTTP\",
+  \"options\": {\"host\": \"${CALC_URL}\", \"base_path\": \"/.well-known/agent.json\", \"bearer_token\": \"databricks\"},
+  \"comment\": \"Calculator Agent\"
+}"
 
 # Grant access
-databricks grants update connection echo-a2a \
+databricks grants update connection "${PREFIX}-echo-a2a" \
   --json '{"changes": [{"add": ["USE_CONNECTION"], "principal": "data-scientists"}]}'
 ```
 
-For non-standard agent card paths (e.g., ServiceNow):
+### External Agents (Different Tenant / No Entra ID)
+
+For agents outside your Azure tenant, UC HTTP connections support multiple auth methods:
+
+**Option 1: Static Bearer Token**
 ```bash
-# ServiceNow uses custom path
-databricks connections create --name "servicenow-a2a" --connection-type HTTP \
-  --options '{"url": "https://myinstance.service-now.com/api/sn_aia/a2a/id/ABC123/well_known/agent_json"}'
+databricks connections create --json '{
+  "name": "servicenow-a2a",
+  "connection_type": "HTTP",
+  "options": {
+    "host": "https://myinstance.service-now.com",
+    "base_path": "/api/sn_aia/a2a/id/ABC123/well_known/agent_json",
+    "bearer_token": "your-static-token"
+  }
+}'
 ```
+
+**Option 2: OAuth M2M (Client Credentials Flow)** - Recommended for A2A
+```bash
+databricks connections create --json '{
+  "name": "workday-a2a",
+  "connection_type": "HTTP",
+  "options": {
+    "host": "https://mycompany.workday.com",
+    "base_path": "/.well-known/agent.json",
+    "client_id": "your-client-id",
+    "client_secret": "your-client-secret",
+    "token_endpoint": "https://auth.workday.com/oauth2/token",
+    "oauth_scope": "a2a.agents"
+  }
+}'
+```
+
+The gateway automatically acquires and caches OAuth tokens when using M2M credentials.
 
 ## Usage
 
@@ -192,10 +238,19 @@ The gateway enforces the same UC connection access for agent-to-agent calls - th
 
 **Discovery Standard**:
 - UC HTTP connection name ends with `-a2a` → agent is discoverable
-- Connection URL = agent card JSON URL (e.g., `https://agent.com/.well-known/agent.json`)
-- Gateway fetches the agent card and uses the `url` field for messaging
+- Connection options:
+  - `host` = agent base URL (e.g., `https://agent.com`)
+  - `base_path` = agent card path (e.g., `/.well-known/agent.json`)
+- Gateway fetches the agent card from `host` + `base_path` and uses the `url` field for messaging
 
 **Authorization**: Uses Databricks OBO (On-Behalf-Of) to check if the calling user/principal can access the UC connection.
+
+**Authentication to Downstream Agents** (aligned with [A2A OAuth support](https://google.github.io/A2A/)):
+| Scenario | Connection Options | Auth Method |
+|----------|-------------------|-------------|
+| Same Azure tenant | `bearer_token: "databricks"` | Gateway passes caller's Entra ID token |
+| External (static token) | `bearer_token: "<token>"` | Gateway uses stored token |
+| External (OAuth M2M) | `client_id`, `client_secret`, `token_endpoint` | Gateway acquires token via client credentials flow |
 
 **Interoperability**: Any A2A-compliant agent can be registered (ServiceNow, Workday, custom). The gateway fetches the agent card and proxies to the endpoint URL specified in the card.
 

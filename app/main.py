@@ -281,6 +281,88 @@ async def get_agent_card_endpoint(agent_name: str, request: Request):
 # Agent Proxy Endpoints
 # =============================================================================
 
+# OAuth token cache: (token_endpoint, client_id) -> (token, expiry_time)
+_oauth_token_cache: Dict[tuple, tuple] = {}
+
+
+async def acquire_oauth_token(oauth_m2m) -> Optional[str]:
+    """Acquire an OAuth token using client credentials flow.
+
+    Args:
+        oauth_m2m: OAuthM2MCredentials with client_id, client_secret, token_endpoint.
+
+    Returns:
+        Access token string or None if acquisition fails.
+    """
+    import time
+
+    cache_key = (oauth_m2m.token_endpoint, oauth_m2m.client_id)
+
+    # Check cache (with 60s buffer before expiry)
+    if cache_key in _oauth_token_cache:
+        token, expiry = _oauth_token_cache[cache_key]
+        if time.time() < expiry - 60:
+            return token
+
+    try:
+        data = {
+            "grant_type": "client_credentials",
+            "client_id": oauth_m2m.client_id,
+            "client_secret": oauth_m2m.client_secret,
+        }
+        if oauth_m2m.oauth_scope:
+            data["scope"] = oauth_m2m.oauth_scope
+
+        response = await _http_client.post(
+            oauth_m2m.token_endpoint,
+            data=data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"}
+        )
+        response.raise_for_status()
+        token_data = response.json()
+
+        access_token = token_data.get("access_token")
+        expires_in = token_data.get("expires_in", 3600)
+
+        # Cache the token
+        _oauth_token_cache[cache_key] = (access_token, time.time() + expires_in)
+        logger.info(f"Acquired OAuth token for {oauth_m2m.client_id}")
+
+        return access_token
+    except Exception as e:
+        logger.error(f"Failed to acquire OAuth token: {e}")
+        return None
+
+
+async def build_proxy_headers(
+    agent: AgentInfo,
+    request: Request,
+    content_type: str = "application/json"
+) -> Dict[str, str]:
+    """Build headers for proxying requests to downstream agents.
+
+    Auth strategy (in priority order):
+    1. OAuth M2M: acquire token via client credentials flow
+    2. Static bearer_token: use token from UC connection
+    3. Databricks pass-through: forward caller's Entra ID token
+    """
+    headers = {"Content-Type": content_type}
+
+    if agent.oauth_m2m:
+        # OAuth M2M: acquire token dynamically
+        token = await acquire_oauth_token(agent.oauth_m2m)
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+    elif agent.bearer_token:
+        # Static bearer token from UC connection
+        headers["Authorization"] = f"Bearer {agent.bearer_token}"
+    elif "authorization" in request.headers:
+        # Databricks pass-through: forward caller's Entra ID token
+        headers["Authorization"] = request.headers["authorization"]
+
+    return headers
+
+
 @app.post("/api/agents/{agent_name}/message", tags=["Proxy"])
 async def send_message(agent_name: str, request: Request):
     """Send a message to an A2A agent.
@@ -302,15 +384,16 @@ async def send_message(agent_name: str, request: Request):
     # Get endpoint URL from agent card
     agent_url = await get_agent_endpoint_url(agent)
 
-    # Get request body
+    # Get request body and build headers
     body = await request.body()
     content_type = request.headers.get("content-type", "application/json")
+    headers = await build_proxy_headers(agent, request, content_type)
 
     try:
         response = await _http_client.post(
             agent_url,
             content=body,
-            headers={"Content-Type": content_type}
+            headers=headers
         )
         return JSONResponse(
             status_code=response.status_code,
@@ -345,6 +428,8 @@ async def stream_message(agent_name: str, request: Request):
     # Get endpoint URL from agent card
     agent_url = await get_agent_endpoint_url(agent)
     body = await request.body()
+    headers = await build_proxy_headers(agent, request)
+    headers["Accept"] = "text/event-stream"
 
     async def stream_response():
         try:
@@ -352,10 +437,7 @@ async def stream_message(agent_name: str, request: Request):
                 "POST",
                 agent_url,
                 content=body,
-                headers={
-                    "Content-Type": "application/json",
-                    "Accept": "text/event-stream"
-                }
+                headers=headers
             ) as response:
                 async for chunk in response.aiter_bytes():
                     yield chunk

@@ -4,3 +4,4 @@ examples/*
 *__pycache__*
 INSTRUCTIONS.md
 .claude-flow*
+*.DS_Store*
