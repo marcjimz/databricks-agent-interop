@@ -305,3 +305,28 @@ The gateway enforces the same UC connection access for agent-to-agent calls - th
 | `make stop` | Stop all apps |
 | `make start` | Start all apps |
 | `make destroy` | Remove all resources |
+
+## Testing
+
+```bash
+# Install test dependencies
+pip install -r tests/requirements.txt
+
+# Run all tests (unit + integration)
+python -m tests.run_tests --prefix $PREFIX
+
+# Run only unit tests (no external services needed)
+python -m tests.run_tests --unit
+
+# Run only integration tests
+python -m tests.run_tests --integration --prefix $PREFIX
+```
+
+**Test Suite:**
+| Category | Tests | Description |
+|----------|-------|-------------|
+| Unit: Models | 8 | AgentInfo, OAuthM2M, responses |
+| Unit: Authorization | 8 | User email extraction, grants checking |
+| Integration: Gateway | 10 | Health, discovery, auth (valid/invalid tokens) |
+| Integration: Agents | 6 | Echo returns input, Calculator (2+2=4, etc.) |
+| Integration: Access Control | 3 | Grant/revoke USE_CONNECTION workflow |
