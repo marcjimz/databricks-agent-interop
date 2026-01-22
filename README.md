@@ -212,30 +212,32 @@ Response:
 If you don't have `USE CONNECTION` privilege:
 
 ```bash
-curl -s "${GATEWAY_URL}/api/agents/calculator/message" \
+curl -s "${GATEWAY_URL}/api/agents/${PREFIX}-calculator/message" \
   -X POST \
   -H "Authorization: Bearer ${TOKEN}" \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":"1","method":"message/send","params":{...}}'
+  -d '{"jsonrpc":"2.0","id":"1","method":"message/send","params":{"message":{"messageId":"msg-1","role":"user","parts":[{"kind":"text","text":"Hello"}]}}}' | jq
 ```
 
 Response:
 ```json
 {
-  "detail": "Access denied to agent connection: calculator-a2a. Ensure you have USE_CONNECTION privilege."
+  "error": "Access denied to agent connection: <prefix>-calculator-a2a. Ensure you have USE_CONNECTION privilege."
 }
 ```
 
 ### 5. Grant/Revoke Access
 
 Grant access:
-```sql
-GRANT USE CONNECTION ON CONNECTION `calculator-a2a` TO `user@example.com`;
+```bash
+databricks grants update connection "${PREFIX}-calculator-a2a" \
+    --json '{"changes": [{"add": ["USE_CONNECTION"], "principal": "marcin.jimenez@databricks.com"}]}'
 ```
 
 Now the same request succeeds. Revoke to deny:
-```sql
-REVOKE USE CONNECTION ON CONNECTION `calculator-a2a` FROM `user@example.com`;
+```bash
+databricks grants update connection "${PREFIX}-calculator-a2a" \
+    --json '{"changes": [{"remove": ["USE_CONNECTION"], "principal": "marcin.jimenez@databricks.com"}]}'
 ```
 
 ### 6. Agent-to-Agent via Gateway
@@ -298,8 +300,8 @@ The gateway enforces the same UC connection access for agent-to-agent calls - th
 
 | Command | Description |
 |---------|-------------|
-| `make deploy` | Deploy bundle + start apps |
-| `make redeploy` | Redeploy apps (code changes) |
+| `make deploy` | Deploy bundle + restart apps |
 | `make status` | Check app status and URLs |
 | `make stop` | Stop all apps |
+| `make start` | Start all apps |
 | `make destroy` | Remove all resources |

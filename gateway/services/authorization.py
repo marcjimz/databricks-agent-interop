@@ -1,15 +1,14 @@
 """Authorization for A2A Gateway using UC connection access.
 
 Users must have access to the UC connection to use the corresponding agent.
-This leverages Databricks Apps OBO (On-Behalf-Of) authentication.
+Databricks Apps strip the Authorization header, so we use x-forwarded-email
+to identify the user and check their grants on the connection.
 """
 
 import logging
 from typing import Optional
 from fastapi import Request, HTTPException, status
 from databricks.sdk import WorkspaceClient
-
-from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -23,64 +22,85 @@ class AuthService:
         Args:
             workspace_client: Optional WorkspaceClient for testing.
         """
-        self._client = workspace_client
+        self._client = workspace_client or WorkspaceClient()
 
-    def get_client_for_request(self, request: Request) -> WorkspaceClient:
-        """Get a WorkspaceClient for the current request.
+    def get_user_email(self, request: Request) -> Optional[str]:
+        """Extract user email from request headers.
 
-        In Databricks Apps with OBO enabled, this uses the calling user's
-        credentials to check permissions.
+        Databricks Apps provide user identity via x-forwarded-email header.
+        For direct API calls, use the Authorization header token to identify the user.
 
         Args:
             request: The FastAPI request object.
 
         Returns:
-            WorkspaceClient configured for the current user.
+            User email or None if not authenticated.
         """
-        # In Databricks Apps, the SDK automatically uses OBO when available
-        # The request headers contain the user's auth token
-        auth_header = request.headers.get("Authorization")
+        # Databricks Apps provide user identity via forwarded headers
+        email = request.headers.get("x-forwarded-email")
+        if email:
+            return email
 
+        # Direct API calls with Authorization header
+        auth_header = request.headers.get("Authorization")
         if auth_header and auth_header.startswith("Bearer "):
             token = auth_header[7:]
-            return WorkspaceClient(
-                host=settings.databricks_host or None,
-                token=token
-            )
+            try:
+                # Create a client with the user's token to get their identity
+                user_client = WorkspaceClient(token=token)
+                me = user_client.current_user.me()
+                return me.user_name
+            except Exception as e:
+                logger.warning(f"Failed to identify user from token: {e}")
 
-        # Fall back to default credentials (for local development)
-        if self._client:
-            return self._client
-        return WorkspaceClient()
+        return None
 
     def check_connection_access(
         self,
-        client: WorkspaceClient,
-        connection_name: str
+        connection_name: str,
+        user_email: str
     ) -> bool:
-        """Check if the current user has access to a UC connection.
+        """Check if a user has USE_CONNECTION privilege on a connection.
 
         Args:
-            client: WorkspaceClient configured with user's credentials.
             connection_name: Name of the UC connection to check.
+            user_email: Email of the user to check access for.
 
         Returns:
             True if user has USE_CONNECTION privilege, False otherwise.
         """
+        # Check if user is the owner (owners always have access)
         try:
-            # Try to get the connection - if user can't access it, this will fail
-            connection = client.connections.get(connection_name)
+            connection = self._client.connections.get(connection_name)
+            if connection and connection.owner == user_email:
+                logger.debug(f"User {user_email} is owner of {connection_name}")
+                return True
+        except Exception as e:
+            logger.warning(f"Error getting connection {connection_name}: {e}")
+            return False
 
-            if connection is None:
-                logger.warning(f"Connection {connection_name} not found")
-                return False
+        # Check grants on the connection via REST API
+        # (SDK grants.get doesn't support CONNECTION securable type)
+        try:
+            response = self._client.api_client.do(
+                "GET",
+                f"/api/2.1/unity-catalog/permissions/connection/{connection_name}"
+            )
 
-            # If we can get the connection, user has at least read access
-            logger.debug(f"User has access to connection {connection_name}")
-            return True
+            # Check if user has USE_CONNECTION privilege
+            if response and "privilege_assignments" in response:
+                for assignment in response["privilege_assignments"]:
+                    if assignment.get("principal") == user_email:
+                        privileges = assignment.get("privileges", [])
+                        if "USE_CONNECTION" in privileges:
+                            logger.debug(f"User {user_email} has USE_CONNECTION on {connection_name}")
+                            return True
+
+            logger.info(f"User {user_email} lacks USE_CONNECTION on {connection_name}")
+            return False
 
         except Exception as e:
-            logger.warning(f"Access denied to connection {connection_name}: {e}")
+            logger.warning(f"Error checking grants for {connection_name}: {e}")
             return False
 
     async def authorize_agent_access(
@@ -99,23 +119,19 @@ class AuthService:
         Raises:
             HTTPException: 403 if access is denied, 401 if not authenticated.
         """
-        try:
-            client = self.get_client_for_request(request)
+        user_email = self.get_user_email(request)
 
-            if not self.check_connection_access(client, connection_name):
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail=f"Access denied to agent connection: {connection_name}. "
-                           f"Ensure you have USE_CONNECTION privilege."
-                )
-
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.error(f"Authorization error: {e}")
+        if not user_email:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Authentication required to access this agent."
+                detail="Authentication required. Unable to identify user."
+            )
+
+        if not self.check_connection_access(connection_name, user_email):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Access denied to agent connection: {connection_name}. "
+                       f"Ensure you have USE_CONNECTION privilege."
             )
 
 

@@ -6,9 +6,6 @@ auth:
 
 deploy:
 	databricks bundle deploy
-	@$(MAKE) -s redeploy
-
-redeploy:
 	@echo "Deploying apps..."
 	@databricks apps deploy $(PREFIX)-a2a-gateway --source-code-path $(BUNDLE_PATH)/gateway --no-wait >/dev/null 2>&1 || true
 	@databricks apps deploy $(PREFIX)-echo-agent --source-code-path $(BUNDLE_PATH)/src/agents/echo --no-wait >/dev/null 2>&1 || true

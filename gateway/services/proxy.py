@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 
 import httpx
 from fastapi import Request, HTTPException, status
+from databricks.sdk import WorkspaceClient
 
 from models import AgentInfo, OAuthM2MCredentials
 
@@ -35,42 +36,53 @@ class ProxyService:
             await self._http_client.aclose()
             self._http_client = None
 
-    async def fetch_agent_card(self, agent_card_url: str) -> Dict[str, Any]:
+    async def fetch_agent_card(
+        self,
+        agent: AgentInfo,
+        request: Request
+    ) -> Dict[str, Any]:
         """Fetch and cache an agent card from its URL.
 
         Args:
-            agent_card_url: URL to the agent card JSON.
+            agent: AgentInfo containing agent_card_url and auth config.
+            request: The original request (for OAuth pass-through).
 
         Returns:
             The agent card as a dictionary.
         """
-        if agent_card_url in self._agent_card_cache:
-            return self._agent_card_cache[agent_card_url]
+        if agent.agent_card_url in self._agent_card_cache:
+            return self._agent_card_cache[agent.agent_card_url]
 
         try:
-            response = await self.http_client.get(agent_card_url)
+            headers = await self.build_proxy_headers(agent, request)
+            response = await self.http_client.get(
+                agent.agent_card_url,
+                headers=headers,
+                follow_redirects=False
+            )
             response.raise_for_status()
             card = response.json()
-            self._agent_card_cache[agent_card_url] = card
-            logger.info(f"Fetched agent card from {agent_card_url}")
+            self._agent_card_cache[agent.agent_card_url] = card
+            logger.info(f"Fetched agent card from {agent.agent_card_url}")
             return card
         except httpx.HTTPError as e:
-            logger.error(f"Failed to fetch agent card from {agent_card_url}: {e}")
+            logger.error(f"Failed to fetch agent card from {agent.agent_card_url}: {e}")
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail=f"Failed to fetch agent card: {str(e)}"
             )
 
-    async def get_agent_endpoint_url(self, agent: AgentInfo) -> str:
+    async def get_agent_endpoint_url(self, agent: AgentInfo, request: Request) -> str:
         """Get the endpoint URL for an agent by fetching its agent card.
 
         Args:
-            agent: AgentInfo with agent_card_url.
+            agent: AgentInfo with agent_card_url and auth config.
+            request: The original request (for OAuth pass-through).
 
         Returns:
             The endpoint URL from the agent card.
         """
-        card = await self.fetch_agent_card(agent.agent_card_url)
+        card = await self.fetch_agent_card(agent, request)
         url = card.get("url", "")
 
         # Handle relative URLs - use agent card URL as base
@@ -132,6 +144,31 @@ class ProxyService:
             logger.error(f"Failed to acquire OAuth token: {e}")
             return None
 
+    def _get_databricks_token(self) -> Optional[str]:
+        """Get a Databricks OAuth token using the SDK.
+
+        In Databricks Apps, the SDK uses OBO (On-Behalf-Of) to get a token
+        for the current user context.
+        """
+        try:
+            client = WorkspaceClient()
+
+            # Direct token from config
+            if client.config.token:
+                return client.config.token
+
+            # Check if there's an oauth token
+            if hasattr(client.config, 'oauth_token') and client.config.oauth_token:
+                token = client.config.oauth_token()
+                if token and hasattr(token, 'access_token'):
+                    return token.access_token
+
+            return None
+
+        except Exception as e:
+            logger.warning(f"Failed to get Databricks token via SDK: {e}")
+            return None
+
     async def build_proxy_headers(
         self,
         agent: AgentInfo,
@@ -143,7 +180,7 @@ class ProxyService:
         Auth strategy (in priority order):
         1. OAuth M2M: acquire token via client credentials flow
         2. Static bearer_token: use token from UC connection
-        3. Databricks pass-through: forward caller's Entra ID token
+        3. Databricks pass-through: get token via SDK OBO
         """
         headers = {"Content-Type": content_type}
 
@@ -152,12 +189,20 @@ class ProxyService:
             token = await self.acquire_oauth_token(agent.oauth_m2m)
             if token:
                 headers["Authorization"] = f"Bearer {token}"
-        elif agent.bearer_token:
+        elif agent.bearer_token and agent.bearer_token.lower() != "databricks":
             # Static bearer token from UC connection
             headers["Authorization"] = f"Bearer {agent.bearer_token}"
-        elif "authorization" in request.headers:
-            # Databricks pass-through: forward caller's Entra ID token
-            headers["Authorization"] = request.headers["authorization"]
+        else:
+            # Databricks pass-through: get token via SDK
+            # Databricks Apps strip the Authorization header, so we use SDK OBO
+            token = self._get_databricks_token()
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Unable to acquire authentication token. Ensure you are logged in."
+                )
 
         return headers
 
@@ -179,7 +224,7 @@ class ProxyService:
         Returns:
             The response from the agent.
         """
-        agent_url = await self.get_agent_endpoint_url(agent)
+        agent_url = await self.get_agent_endpoint_url(agent, request)
         headers = await self.build_proxy_headers(agent, request, content_type)
 
         try:
@@ -212,7 +257,7 @@ class ProxyService:
         Yields:
             Response chunks from the agent.
         """
-        agent_url = await self.get_agent_endpoint_url(agent)
+        agent_url = await self.get_agent_endpoint_url(agent, request)
         headers = await self.build_proxy_headers(agent, request)
         headers["Accept"] = "text/event-stream"
 

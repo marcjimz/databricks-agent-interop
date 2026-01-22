@@ -83,7 +83,7 @@ async def get_agent_card(agent_name: str, request: Request):
 
     await auth_service.authorize_agent_access(request, agent.connection_name)
 
-    return await proxy_service.fetch_agent_card(agent.agent_card_url)
+    return await proxy_service.fetch_agent_card(agent, request)
 
 
 @router.post("/{agent_name}/message")
@@ -111,9 +111,15 @@ async def send_message(agent_name: str, request: Request):
 
     response = await proxy_service.send_message(agent, request, body, content_type)
 
+    # Handle response
+    try:
+        content = response.json()
+    except Exception:
+        content = {"error": f"Invalid response from agent: {response.text[:500]}"}
+
     return JSONResponse(
         status_code=response.status_code,
-        content=response.json()
+        content=content
     )
 
 

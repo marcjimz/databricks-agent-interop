@@ -10,7 +10,7 @@ import logging
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -66,6 +66,15 @@ async def request_timing(request: Request, call_next):
     duration = time.time() - start
     response.headers["X-Process-Time"] = f"{duration:.3f}s"
     return response
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Handle HTTP exceptions with proper JSON response."""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": exc.detail}
+    )
 
 
 @app.exception_handler(Exception)
