@@ -146,17 +146,37 @@ def calculator_connection_name(prefix):
     return f"{prefix}-calculator-a2a"
 
 
-def make_a2a_message(text: str, message_id: str = "test-msg-1") -> dict:
-    """Create an A2A JSON-RPC message."""
+def make_a2a_message(
+    text: str,
+    message_id: str = "msg-1",
+    context_id: str = None,
+    task_id: str = None
+) -> dict:
+    """Create an A2A JSON-RPC message.
+
+    Args:
+        text: The message text content.
+        message_id: Message ID (required by a2a-sdk implementations).
+        context_id: Optional context ID for multi-turn conversations.
+        task_id: Optional task ID for follow-up messages.
+
+    Returns:
+        A2A JSON-RPC message dict compatible with a2a-sdk.
+    """
+    message = {
+        "messageId": message_id,
+        "role": "user",
+        "parts": [{"kind": "text", "text": text}]
+    }
+
+    if context_id:
+        message["contextId"] = context_id
+    if task_id:
+        message["taskId"] = task_id
+
     return {
         "jsonrpc": "2.0",
         "id": "1",
         "method": "message/send",
-        "params": {
-            "message": {
-                "messageId": message_id,
-                "role": "user",
-                "parts": [{"kind": "text", "text": text}]
-            }
-        }
+        "params": {"message": message}
     }

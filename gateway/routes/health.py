@@ -34,10 +34,20 @@ async def gateway_agent_card():
         "description": "A2A Gateway that discovers and proxies to Databricks agents via UC connections",
         "url": "/",
         "version": settings.app_version,
+        "protocolVersions": ["1.0"],
         "capabilities": {
             "streaming": True,
-            "push_notifications": False
+            "pushNotifications": False
         },
+        "securitySchemes": {
+            "bearer": {
+                "type": "http",
+                "scheme": "bearer",
+                "description": "Databricks OAuth token or service principal token"
+            }
+        },
+        "defaultInputModes": ["text", "text/plain", "application/json"],
+        "defaultOutputModes": ["text", "text/plain", "application/json"],
         "skills": [
             {
                 "id": "discover_agents",
