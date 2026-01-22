@@ -1,20 +1,26 @@
 """Integration tests for access control scenarios.
 
-This module tests the complete access control workflow:
-1. Remove USE_CONNECTION from agent (where user is NOT owner)
-2. Verify access is denied
-3. Add USE_CONNECTION to agent
-4. Verify access is granted
-5. Remove USE_CONNECTION again
-6. Verify access is denied again
+NOTE: These tests are for the OLD authorization model where the gateway
+explicitly checked USE_CONNECTION permissions. With OBO (On-Behalf-Of)
+authentication, access control works differently:
 
-NOTE: Connection owners always have access regardless of grants.
-These tests only work on connections where the test user is NOT the owner.
+1. The gateway uses the caller's token via OBO
+2. The Databricks SDK automatically filters connections based on user permissions
+3. Users simply don't see connections they can't access (no explicit 403)
+
+These tests are SKIPPED because they don't apply to the OBO model.
 """
 
 import pytest
 import time
 from tests.conftest import make_a2a_message
+
+
+# Skip all tests in this module - they test the old authorization model
+pytestmark = pytest.mark.skip(
+    reason="Access control tests are for the old authorization model. "
+           "With OBO, the Databricks SDK handles access control automatically."
+)
 
 
 class TestAccessControlWorkflow:

@@ -1,4 +1,8 @@
-"""Agent discovery and proxy endpoints for the A2A Gateway."""
+"""Agent discovery and proxy endpoints for the A2A Gateway.
+
+Uses OBO (On-Behalf-Of) authentication to list and access agents
+as the calling user, respecting Unity Catalog permissions.
+"""
 
 import logging
 
@@ -6,7 +10,7 @@ from fastapi import APIRouter, Request, HTTPException, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from models import AgentListResponse, AgentInfo
-from services import get_discovery, get_auth_service, get_proxy_service
+from services import get_discovery, get_proxy_service, extract_token_from_request
 
 logger = logging.getLogger(__name__)
 
@@ -18,26 +22,17 @@ async def list_agents(request: Request):
     """List all discoverable A2A agents.
 
     Discovers agents by finding UC connections that end with '-a2a'.
-    Returns only agents the calling user has access to.
+    Uses OBO to list only connections the calling user has access to.
     """
-    discovery = get_discovery()
-    auth_service = get_auth_service()
+    auth_token = extract_token_from_request(request)
+    logger.info(f"list_agents: auth_token present={auth_token is not None}")
 
-    all_agents = discovery.discover_agents()
-
-    # Filter to only agents the user can access
-    accessible_agents = []
-    for agent in all_agents:
-        try:
-            await auth_service.authorize_agent_access(request, agent.connection_name)
-            accessible_agents.append(agent)
-        except HTTPException:
-            # User doesn't have access to this agent
-            logger.debug(f"User cannot access agent: {agent.name}")
+    discovery = get_discovery(auth_token=auth_token)
+    agents = discovery.discover_agents()
 
     return AgentListResponse(
-        agents=accessible_agents,
-        total=len(accessible_agents)
+        agents=agents,
+        total=len(agents)
     )
 
 
@@ -48,8 +43,8 @@ async def get_agent(agent_name: str, request: Request):
     Args:
         agent_name: Name of the agent (without -a2a suffix).
     """
-    discovery = get_discovery()
-    auth_service = get_auth_service()
+    auth_token = extract_token_from_request(request)
+    discovery = get_discovery(auth_token=auth_token)
 
     agent = discovery.get_agent_by_name(agent_name)
     if not agent:
@@ -57,9 +52,6 @@ async def get_agent(agent_name: str, request: Request):
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Agent '{agent_name}' not found"
         )
-
-    # Check authorization
-    await auth_service.authorize_agent_access(request, agent.connection_name)
 
     return agent
 
@@ -70,8 +62,8 @@ async def get_agent_card(agent_name: str, request: Request):
 
     Fetches from the agent_card_url stored in the UC connection.
     """
-    discovery = get_discovery()
-    auth_service = get_auth_service()
+    auth_token = extract_token_from_request(request)
+    discovery = get_discovery(auth_token=auth_token)
     proxy_service = get_proxy_service()
 
     agent = discovery.get_agent_by_name(agent_name)
@@ -80,8 +72,6 @@ async def get_agent_card(agent_name: str, request: Request):
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Agent '{agent_name}' not found"
         )
-
-    await auth_service.authorize_agent_access(request, agent.connection_name)
 
     return await proxy_service.fetch_agent_card(agent, request)
 
@@ -92,8 +82,8 @@ async def send_message(agent_name: str, request: Request):
 
     Proxies the JSON-RPC request to the agent's endpoint URL (from agent card).
     """
-    discovery = get_discovery()
-    auth_service = get_auth_service()
+    auth_token = extract_token_from_request(request)
+    discovery = get_discovery(auth_token=auth_token)
     proxy_service = get_proxy_service()
 
     agent = discovery.get_agent_by_name(agent_name)
@@ -102,8 +92,6 @@ async def send_message(agent_name: str, request: Request):
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Agent '{agent_name}' not found"
         )
-
-    await auth_service.authorize_agent_access(request, agent.connection_name)
 
     # Get request body
     body = await request.body()
@@ -129,8 +117,8 @@ async def stream_message(agent_name: str, request: Request):
 
     Proxies the request and streams SSE responses back.
     """
-    discovery = get_discovery()
-    auth_service = get_auth_service()
+    auth_token = extract_token_from_request(request)
+    discovery = get_discovery(auth_token=auth_token)
     proxy_service = get_proxy_service()
 
     agent = discovery.get_agent_by_name(agent_name)
@@ -139,8 +127,6 @@ async def stream_message(agent_name: str, request: Request):
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Agent '{agent_name}' not found"
         )
-
-    await auth_service.authorize_agent_access(request, agent.connection_name)
 
     body = await request.body()
 

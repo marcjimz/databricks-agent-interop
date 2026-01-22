@@ -467,7 +467,7 @@ print(response["messages"][-1].content)
 # COMMAND ----------
 
 # DBTITLE 1,Log Agent to MLflow
-from mlflow.models.auth_policy import AuthPolicy, UserAuthPolicy
+from mlflow.models.auth_policy import AuthPolicy, SystemAuthPolicy, UserAuthPolicy
 from mlflow.models.resources import DatabricksServingEndpoint
 
 print("📦 Logging agent to MLflow...\n")
@@ -480,27 +480,40 @@ model_config = {
     "gateway_url": GATEWAY_URL,  # A2A Gateway URL for agent discovery and calling
 }
 
+# System Auth Policy - for resources accessed by the service principal
+# This allows the agent to call the foundation model endpoint
+resources = [DatabricksServingEndpoint(endpoint_name=FOUNDATION_MODEL)]
+system_auth_policy = SystemAuthPolicy(resources=resources)
+
 # User Auth Policy - OBO scopes for acting as the end user
 # This enables the agent to call APIs using the caller's identity
 user_auth_policy = UserAuthPolicy(
     api_scopes=[
-        "apps.apps",                    # For calling Databricks Apps (A2A Gateway)
-        "serving.serving-endpoints",    # For calling serving endpoints (foundation model)
+        "apps.apps",  # For calling Databricks Apps (A2A Gateway) as the user
     ]
 )
 
-# Auth policy with just user policy for OBO
-auth_policy = AuthPolicy(user_auth_policy=user_auth_policy)
+# Combined Auth Policy - both system and user auth
+# - System: service principal access to LLM endpoint
+# - User: OBO access to apps.apps API
+auth_policy = AuthPolicy(
+    system_auth_policy=system_auth_policy,
+    user_auth_policy=user_auth_policy
+)
 
-print("🔐 Auth Policy configured (OBO only):")
-print(f"   User scopes: {user_auth_policy.api_scopes}")
+print("🔐 Auth Policy configured:")
+print(f"   System resources: {[r.endpoint_name for r in resources]}")
+print(f"   User scopes (OBO): {user_auth_policy.api_scopes}")
 
 # Debug: verify auth_policy object
 print(f"\n🔍 Debug - auth_policy object:")
 print(f"   Type: {type(auth_policy)}")
 print(f"   Has system_auth_policy: {auth_policy.system_auth_policy is not None}")
 print(f"   Has user_auth_policy: {auth_policy.user_auth_policy is not None}")
-print(f"   User scopes: {auth_policy.user_auth_policy.api_scopes}")
+if auth_policy.system_auth_policy:
+    print(f"   System resources: {[r.endpoint_name for r in auth_policy.system_auth_policy.resources]}")
+if auth_policy.user_auth_policy:
+    print(f"   User scopes: {auth_policy.user_auth_policy.api_scopes}")
 
 # Input example
 input_example = {

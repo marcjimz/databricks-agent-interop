@@ -2,9 +2,13 @@
 
 Discovers agents by finding Unity Catalog connections that end with '-a2a'.
 Each connection's metadata contains the agent URL and capabilities.
+
+Uses OBO (On-Behalf-Of) authentication when an auth token is provided,
+allowing the gateway to list connections as the calling user.
 """
 
 import logging
+import os
 from typing import List, Optional
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.catalog import ConnectionInfo
@@ -15,23 +19,52 @@ from models import AgentInfo, OAuthM2MCredentials
 logger = logging.getLogger(__name__)
 
 
+def extract_token_from_request(request) -> Optional[str]:
+    """Extract bearer token from request Authorization header."""
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.lower().startswith("bearer "):
+        return auth_header[7:]
+    return None
+
+
+def create_obo_client(auth_token: Optional[str] = None) -> WorkspaceClient:
+    """Create a WorkspaceClient, optionally using OBO with the provided token.
+
+    Args:
+        auth_token: Optional bearer token for OBO authentication.
+                   If provided, creates client as the token's user.
+                   If None, uses app's default credentials.
+    """
+    if auth_token:
+        host = os.environ.get("DATABRICKS_HOST", "")
+        logger.info(f"Creating OBO client with token (length={len(auth_token)}) for host={host}")
+        if host:
+            return WorkspaceClient(token=auth_token, host=host)
+        else:
+            return WorkspaceClient(token=auth_token)
+    else:
+        logger.info("Creating client with app's default credentials (no OBO)")
+        return WorkspaceClient()
+
+
 class AgentDiscovery:
     """Discovers A2A agents via Unity Catalog connections."""
 
-    def __init__(self, workspace_client: Optional[WorkspaceClient] = None):
-        """Initialize discovery with optional workspace client.
+    def __init__(self, auth_token: Optional[str] = None):
+        """Initialize discovery with optional auth token for OBO.
 
         Args:
-            workspace_client: Optional WorkspaceClient. If not provided,
-                            will be created using environment credentials.
+            auth_token: Optional bearer token for OBO authentication.
+                       If provided, UC connections are listed as that user.
         """
-        self._client = workspace_client
+        self._auth_token = auth_token
+        self._client: Optional[WorkspaceClient] = None
 
     @property
     def client(self) -> WorkspaceClient:
         """Get or create the workspace client."""
         if self._client is None:
-            self._client = WorkspaceClient()
+            self._client = create_obo_client(self._auth_token)
         return self._client
 
     def list_a2a_connections(self) -> List[ConnectionInfo]:
@@ -182,13 +215,14 @@ class AgentDiscovery:
         return None
 
 
-# Global discovery instance
-_discovery: Optional[AgentDiscovery] = None
+def get_discovery(auth_token: Optional[str] = None) -> AgentDiscovery:
+    """Get an AgentDiscovery instance.
 
+    Args:
+        auth_token: Optional bearer token for OBO authentication.
+                   Each request should pass the user's token for proper OBO.
 
-def get_discovery() -> AgentDiscovery:
-    """Get the global AgentDiscovery instance."""
-    global _discovery
-    if _discovery is None:
-        _discovery = AgentDiscovery()
-    return _discovery
+    Note: We create a new instance per request when auth_token is provided
+    to ensure proper OBO isolation between users.
+    """
+    return AgentDiscovery(auth_token=auth_token)
