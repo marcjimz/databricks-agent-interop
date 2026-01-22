@@ -5,3 +5,4 @@ examples/*
 INSTRUCTIONS.md
 .claude-flow*
 *.DS_Store*
+notebooks/settings.yaml

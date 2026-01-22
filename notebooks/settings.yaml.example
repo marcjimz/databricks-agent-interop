@@ -1,0 +1,29 @@
+# A2A Gateway Notebook Settings
+#
+# Edit this file with your configuration values before running the notebooks.
+#
+# Authentication:
+#   Run this command locally to get an OAuth token:
+#     databricks auth token --host "${DATABRICKS_HOST}"
+#
+#   Tokens expire after ~1 hour. Regenerate if you get 401/302 errors.
+#
+# Alternatively, use a Service Principal (see README.md for details).
+
+# Your deployment prefix (used in app names)
+prefix: "marcin"
+
+# OAuth access token from 'databricks auth token' command
+# Leave empty to use WorkspaceClient default auth (works if running in workspace)
+access_token: ""
+
+# Workspace URL suffix (the part after your prefix in app URLs)
+# This is specific to your Databricks workspace
+workspace_url_suffix: "-1444828305810485.aws.databricksapps.com"
+
+# Unity Catalog settings (for a2a_agent_deploy.py)
+catalog: "main"
+schema: "default"
+
+# Foundation model for the orchestrator agent
+foundation_model: "databricks-meta-llama-3-1-8b-instruct"

@@ -26,6 +26,11 @@ For more on AI Agent Protocols, reference the helpful paper: [A Survey of AI Age
 **Demo Agents** (`src/agents/`)
 - Echo Agent - Simple echo back for testing
 - Calculator Agent - Arithmetic with LangChain tools
+- Assistant Agent - Orchestrator that discovers and uses other agents (optional)
+
+**Demo Notebooks** (`notebooks/`)
+- `a2a_demo.py` - Interactive notebook demonstrating all A2A protocol features
+- `a2a_agent_deploy.py` - Deploy an A2A orchestrator agent to Mosaic AI Framework
 
 ## Prerequisites
 
@@ -306,13 +311,154 @@ The gateway enforces the same UC connection access for agent-to-agent calls - th
 | `make start` | Start all apps |
 | `make destroy` | Remove all resources |
 
+## Demo Notebooks
+
+After deployment, run the interactive demo notebooks in your Databricks workspace:
+
+**Location:** `/Workspace/Users/<your-email>/.bundle/a2a-gateway/dev/files/notebooks/`
+
+### a2a_demo.py - A2A Protocol Demo
+
+Demonstrates A2A protocol features using the official A2A SDK:
+- Agent Discovery via `A2ACardResolver`
+- Agent Card inspection
+- Synchronous messaging via `A2AClient`
+- SSE Streaming
+- Multi-agent orchestration
+- A2A Client as LangChain tool pattern
+
+### a2a_agent_deploy.py - Deploy to Mosaic AI Framework
+
+Deploys an A2A orchestrator agent to Databricks Mosaic AI Framework:
+- Build agent with LangChain/LangGraph + A2A SDK tools
+- Log to MLflow (models-from-code pattern)
+- Register to Unity Catalog
+- Deploy with `agents.deploy()`
+- Creates Model Serving endpoint with autoscaling, Review App, and inference tables
+
+### Example Prompts
+
+**Echo Agent** - Test connectivity and message handling:
+```
+"Hello from A2A!"
+"Test message with special chars: @#$%^&*()"
+"Echo this back to me please"
+```
+
+**Calculator Agent** - Arithmetic operations:
+```
+"Add 15 and 27"
+"Multiply 6 by 7"
+"Divide 100 by 4"
+"What is 25 times 4?"
+```
+
+**Combined Multi-Agent Workflow**:
+```python
+# 1. Discover available agents
+agents = list_agents()
+
+# 2. Verify connectivity with Echo
+echo_response = send_message("marcin-echo", "System check")
+
+# 3. Perform calculation
+calc_response = send_message("marcin-calculator", "Multiply 1250 by 12")
+
+# 4. Use streaming for real-time feedback
+stream_message("marcin-calculator", "Add 100 and 200")
+```
+
+### Assistant Agent (Optional)
+
+The Assistant Agent is an orchestrator that can discover and use other agents automatically. To deploy it, uncomment the `assistant_agent` section in `databricks.yml` and redeploy.
+
+**Example prompts for Assistant Agent:**
+```
+"What agents are available?"
+"Calculate 15 plus 27 for me"
+"Echo hello world"
+"First discover agents, then calculate 100 divided by 5"
+```
+
+## Programmatic Access with Service Principals
+
+For automated or programmatic access to Databricks Apps (including the A2A Gateway and agents), use a Service Principal instead of user tokens.
+
+### 1. Create a Service Principal
+
+```bash
+# Create the service principal
+databricks service-principals create \
+  --display-name "a2a-gateway-sp" \
+  --application-id <your-entra-app-id>
+```
+
+Or via the Databricks UI: **Settings → Identity and access → Service principals → Add**.
+
+### 2. Generate OAuth Secret
+
+```bash
+# List service principals to get the ID
+databricks service-principals list
+
+# Create OAuth secret (note: secrets are shown only once)
+databricks service-principals secrets create <service-principal-id>
+```
+
+Save the `client_id` (application ID) and `client_secret` from the response.
+
+### 3. Grant App Access to the Service Principal
+
+```bash
+# Get the app's service principal ID
+APP_SP_ID=$(databricks apps get "${PREFIX}-a2a-gateway" --output json | jq -r '.service_principal_id')
+
+# Grant the SP permission to access the app
+databricks permissions update serving-endpoints "${PREFIX}-a2a-gateway" \
+  --json "{\"access_control_list\": [{\"service_principal_name\": \"a2a-gateway-sp\", \"permission_level\": \"CAN_QUERY\"}]}"
+```
+
+### 4. Use WorkspaceClient with Service Principal
+
+```python
+from databricks.sdk import WorkspaceClient
+import httpx
+
+# Initialize with SP credentials
+w = WorkspaceClient(
+    host="https://your-workspace.cloud.databricks.com",
+    client_id="<your-client-id>",
+    client_secret="<your-client-secret>"
+)
+
+# Get OAuth headers
+auth_headers = w.config.authenticate()
+
+# Call the A2A Gateway
+gateway_url = "https://your-a2a-gateway.databricksapps.com"
+with httpx.Client(headers=auth_headers) as client:
+    response = client.get(f"{gateway_url}/api/agents")
+    print(response.json())
+```
+
+### 5. Grant UC Connection Access to SP
+
+For the SP to access specific agents, grant `USE_CONNECTION` privilege:
+
+```bash
+databricks grants update connection "${PREFIX}-echo-a2a" \
+  --json '{"changes": [{"add": ["USE_CONNECTION"], "principal": "a2a-gateway-sp"}]}'
+```
+
+This enables fully automated agent-to-agent communication without user intervention.
+
 ## Testing
 
 ```bash
 # Install test dependencies
 pip install -r tests/requirements.txt
 
-# Run all tests (unit + integration)
+# Run all tests (unit + integration + A2A compliance)
 python -m tests.run_tests --prefix $PREFIX
 
 # Run only unit tests (no external services needed)
@@ -322,11 +468,12 @@ python -m tests.run_tests --unit
 python -m tests.run_tests --integration --prefix $PREFIX
 ```
 
-**Test Suite:**
+**Test Suite (68 tests):**
 | Category | Tests | Description |
 |----------|-------|-------------|
-| Unit: Models | 8 | AgentInfo, OAuthM2M, responses |
-| Unit: Authorization | 8 | User email extraction, grants checking |
-| Integration: Gateway | 10 | Health, discovery, auth (valid/invalid tokens) |
-| Integration: Agents | 6 | Echo returns input, Calculator (2+2=4, etc.) |
+| Unit: Models | 9 | AgentInfo, OAuthM2M, responses |
+| Unit: Authorization | 10 | User email extraction, grants checking |
+| Unit: Agents | 8 | Echo returns input, Calculator (2+2=4, etc.) |
+| Integration: Gateway | 13 | Health, discovery, auth (valid/invalid tokens) |
+| Integration: A2A Compliance | 25 | Agent card, JSON-RPC, task states, streaming |
 | Integration: Access Control | 3 | Grant/revoke USE_CONNECTION workflow |

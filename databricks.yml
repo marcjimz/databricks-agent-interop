@@ -12,6 +12,10 @@ variables:
     description: "Schema for A2A connections"
     default: "a2a_demo"
 
+sync:
+  include:
+    - notebooks/*
+
 resources:
   apps:
     a2a_gateway:
@@ -28,6 +32,12 @@ resources:
       name: "${var.name_prefix}-calculator-agent"
       description: "Calculator Agent for A2A demo"
       source_code_path: ./src/agents/calculator
+
+    # Uncomment to deploy the Assistant Agent (requires available app slots)
+    # assistant_agent:
+    #   name: "${var.name_prefix}-assistant-agent"
+    #   description: "Assistant Agent - orchestrates other A2A agents"
+    #   source_code_path: ./src/agents/assistant
 
 targets:
   dev:

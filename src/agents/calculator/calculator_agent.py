@@ -344,7 +344,12 @@ def build_calculator_agent_app():
             "agent_card": "/.well-known/agent.json"
         })
 
+    async def agent_card_alias(request):
+        """Alias for agent card (A2A SDK compatibility)."""
+        return JSONResponse(agent_card.model_dump(mode="json"))
+
     app.routes.insert(0, Route("/", root, methods=["GET"]))
+    app.routes.insert(1, Route("/.well-known/agent-card.json", agent_card_alias, methods=["GET"]))
 
     async def _close_httpx():
         await httpx_client.aclose()
