@@ -418,5 +418,6 @@ python -m tests.run_tests --integration --prefix $PREFIX
 
 ## ToDos
 
+0. Move Agent Deploy orchestrator to Databricks Apps
 1. Implement auth flows for Gateway to Models (OBO through UC connections, app identity through to target infrastructure)
 2. Implement MLflow Tracing

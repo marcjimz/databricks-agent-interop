@@ -496,7 +496,7 @@ model_config = {
 # This allows fine-grained UC access control for A2A Gateway calls
 user_auth_policy = UserAuthPolicy(
     api_scopes=[
-        "serving.serving-endpoints",  # For calling Databricks Apps (A2A Gateway)
+        "apps.apps",  # For calling Databricks Apps (A2A Gateway)
     ]
 )
 auth_policy = AuthPolicy(user_auth_policy=user_auth_policy)
