@@ -129,7 +129,7 @@ ECHO_AGENT_URL = f"https://{PREFIX}-echo-agent{WORKSPACE_URL_SUFFIX}"
 CALC_AGENT_URL = f"https://{PREFIX}-calculator-agent{WORKSPACE_URL_SUFFIX}"
 
 # Unity Catalog model name
-AGENT_NAME = "a2a_orchestrator_agent"
+AGENT_NAME = "a2a_orchestrator"
 UC_MODEL_NAME = f"{CATALOG}.{SCHEMA}.{AGENT_NAME}_{normalized_username}"
 
 print(f"✅ Configuration loaded")
@@ -175,7 +175,8 @@ print(f"   Experiment ID: {experiment_id}")
 # MAGIC %md
 # MAGIC ## 2. Build the A2A Orchestrator Agent
 # MAGIC
-# MAGIC The agent uses LangGraph with tools that leverage the official A2A SDK.
+# MAGIC The agent uses LangGraph with tools that call the A2A Gateway directly via HTTP.
+# MAGIC When deployed with OBO authentication, these calls use the caller's credentials.
 
 # COMMAND ----------
 
@@ -190,31 +191,10 @@ from uuid import uuid4
 import httpx
 import asyncio
 
-
-def extract_text_from_response(response) -> str:
-    """Extract text from A2A response (handles both tuple and Message types)."""
-    if response is None:
-        return ""
-    if isinstance(response, tuple):
-        task, update = response
-        if task and task.artifacts:
-            for artifact in task.artifacts:
-                for part in artifact.parts:
-                    if hasattr(part, 'root') and hasattr(part.root, 'text'):
-                        return part.root.text
-        return ""
-    if hasattr(response, 'parts'):
-        for part in response.parts:
-            if hasattr(part, 'root') and hasattr(part.root, 'text'):
-                return part.root.text
-        return ""
-    return str(response)
-
-
 print("🏗️ Building A2A Orchestrator Agent...\n")
 
-# Note: AUTH_HEADERS is defined in the Configuration section above
-# from the access_token widget
+# Note: AUTH_HEADERS is used for local notebook tests
+# When deployed with OBO, the agent uses the caller's credentials instead
 
 # Initialize the foundation model
 llm = ChatDatabricks(
@@ -223,7 +203,7 @@ llm = ChatDatabricks(
     max_tokens=1000
 )
 
-# System prompt (matches the deployed model's prompt)
+# System prompt
 SYSTEM_PROMPT = """You are an A2A Orchestrator Agent that can discover and communicate with other A2A-compliant agents.
 
 You have access to tools that let you:
@@ -330,7 +310,7 @@ def call_a2a_agent(agent_url: str, message: str) -> str:
             factory = ClientFactory(config=config)
             client = factory.create(card=card)
 
-            # Create Message object (new SDK API)
+            # Create Message object
             msg = Message(
                 messageId=str(uuid4()),
                 role="user",
@@ -344,9 +324,13 @@ def call_a2a_agent(agent_url: str, message: str) -> str:
                     task, update = event
                     final_task = task
 
-            # Extract text using helper function
-            if final_task:
-                return extract_text_from_response((final_task, None)) or "No text response"
+            # Extract text from task
+            if final_task and final_task.artifacts:
+                for artifact in final_task.artifacts:
+                    for part in artifact.parts:
+                        if hasattr(part, 'root') and hasattr(part.root, 'text'):
+                            return part.root.text
+
             return "No response"
 
     try:
@@ -418,6 +402,9 @@ print(f"   Tools: {[t.name for t in tools]}")
 
 # MAGIC %md
 # MAGIC ## 3. Test the Agent Locally
+# MAGIC
+# MAGIC **Note:** These tests run the agent locally using your OAuth token.
+# MAGIC When deployed with OBO, the agent will use the caller's credentials instead.
 
 # COMMAND ----------
 
@@ -480,7 +467,8 @@ print(response["messages"][-1].content)
 # COMMAND ----------
 
 # DBTITLE 1,Log Agent to MLflow
-from mlflow.models.auth_policy import AuthPolicy, SystemAuthPolicy, UserAuthPolicy
+from mlflow.models.auth_policy import AuthPolicy, UserAuthPolicy
+from mlflow.models.resources import DatabricksServingEndpoint
 
 print("📦 Logging agent to MLflow...\n")
 
@@ -489,19 +477,30 @@ model_config = {
     "foundation_model_endpoint": FOUNDATION_MODEL,
     "temperature": 0.1,
     "max_tokens": 1000,
-    "gateway_url": GATEWAY_URL,
+    "gateway_url": GATEWAY_URL,  # A2A Gateway URL for agent discovery and calling
 }
 
-# OBO Auth Policy - enables the agent to act on behalf of the user
-# This allows fine-grained UC access control for A2A Gateway calls
+# User Auth Policy - OBO scopes for acting as the end user
+# This enables the agent to call APIs using the caller's identity
 user_auth_policy = UserAuthPolicy(
     api_scopes=[
-        "apps.apps",  # For calling Databricks Apps (A2A Gateway)
+        "apps.apps",                    # For calling Databricks Apps (A2A Gateway)
+        "serving.serving-endpoints",    # For calling serving endpoints (foundation model)
     ]
 )
+
+# Auth policy with just user policy for OBO
 auth_policy = AuthPolicy(user_auth_policy=user_auth_policy)
 
-print("🔐 OBO Authentication enabled - agent will use caller's credentials")
+print("🔐 Auth Policy configured (OBO only):")
+print(f"   User scopes: {user_auth_policy.api_scopes}")
+
+# Debug: verify auth_policy object
+print(f"\n🔍 Debug - auth_policy object:")
+print(f"   Type: {type(auth_policy)}")
+print(f"   Has system_auth_policy: {auth_policy.system_auth_policy is not None}")
+print(f"   Has user_auth_policy: {auth_policy.user_auth_policy is not None}")
+print(f"   User scopes: {auth_policy.user_auth_policy.api_scopes}")
 
 # Input example
 input_example = {
@@ -540,45 +539,60 @@ signature = mlflow.models.infer_signature(
 
 print(f"✅ Signature inferred")
 
-# Log the model with OBO auth policy
-model_info = mlflow.pyfunc.log_model(
-    artifact_path="agent",
-    python_model="../src/agents/orchestrator/a2a_orchestrator_model.py",
-    model_config=model_config,
-    input_example=input_example,
-    signature=signature,
-    auth_policy=auth_policy,  # Enable OBO authentication
-    pip_requirements=[
-        "mlflow>=3.1.0",
-        "langchain>=0.3.0",
-        "langchain-core>=0.3.0",
-        "langgraph>=0.2.0",
-        "databricks-langchain>=0.1.0",
-        "databricks-sdk>=0.40.0",
-        "databricks-ai-bridge>=0.3.0",  # Required for OBO auth (ModelServingUserCredentials)
-        "a2a-sdk[http-server]>=0.3.0",
-        "httpx>=0.27.0",
-    ]
-)
+# Log the model with OBO auth policy using MLflow 3.x pattern
+with mlflow.start_run() as run:
+    run_id = run.info.run_id
 
-run_id = model_info.run_id
-model_uri = model_info.model_uri
+    # Log model with auth_policy for OBO (MLflow 3.x pattern)
+    model_info = mlflow.pyfunc.log_model(
+        name="agent",  # MLflow 3.x uses 'name' instead of 'artifact_path'
+        python_model="../src/agents/orchestrator/a2a_orchestrator_model.py",
+        model_config=model_config,
+        input_example=input_example,
+        signature=signature,
+        auth_policy=auth_policy,  # Enable OBO authentication
+        pip_requirements=[
+            "mlflow>=3.1.0",
+            "langchain>=0.3.0",
+            "langchain-core>=0.3.0",
+            "langgraph>=0.2.0",
+            "databricks-langchain>=0.1.0",
+            "databricks-sdk>=0.40.0",
+            "databricks-ai-bridge>=0.1.0",  # For ModelServingUserCredentials
+            "a2a-sdk>=0.3.0",
+            "httpx>=0.27.0",
+        ]
+    )
 
-# Log additional metadata
-with mlflow.start_run(run_id=run_id):
+    model_uri = model_info.model_uri
+
+    # Log additional metadata in the same run
     mlflow.log_param("foundation_model", FOUNDATION_MODEL)
     mlflow.log_param("num_tools", len(tools))
-    mlflow.log_param("gateway_url", GATEWAY_URL)
     mlflow.log_param("pattern", "models-from-code")
+    mlflow.log_param("auth_method", "obo")
 
     mlflow.set_tag("agent_type", "a2a_orchestrator")
     mlflow.set_tag("interoperable", "true")
     mlflow.set_tag("a2a_compliant", "true")
+    mlflow.set_tag("uses_obo", "true")
     mlflow.set_tag("created_by", username)
 
 print(f"\n✅ Agent logged to MLflow")
 print(f"   Run ID: {run_id}")
 print(f"   Model URI: {model_uri}")
+
+# Verify auth_policy was logged
+client = mlflow.tracking.MlflowClient()
+print(f"\n📂 Model artifacts:")
+artifacts = client.list_artifacts(run_id, "agent")
+for a in artifacts:
+    print(f"   - {a.path}")
+auth_policy_found = any("auth_policy" in a.path for a in artifacts)
+if auth_policy_found:
+    print(f"\n   ✅ auth_policy.yaml found - OBO configured")
+else:
+    print(f"   ❌ auth_policy.yaml NOT found - OBO may not work!")
 
 # COMMAND ----------
 
@@ -629,6 +643,7 @@ print(f"   Version: {model_version}")
 print(f"   ⏰ This may take 10-15 minutes...\n")
 
 deployment = agents.deploy(
+    endpoint_name=f"{PREFIX}-a2a_agent_orchestrator",
     model_name=UC_MODEL_NAME,
     model_version=model_version,
     scale_to_zero_enabled=True  # Cost optimization
@@ -665,9 +680,10 @@ print(f"   3. Register as A2A agent via UC connection for full interoperability"
 import time
 from databricks.sdk.service.serving import EndpointStateReady, ChatMessage, ChatMessageRole
 
-def wait_for_endpoint_ready(client, endpoint_name, timeout_minutes=15, poll_interval_seconds=30):
-    """Wait for serving endpoint to be ready."""
+def wait_for_endpoint_ready(client, endpoint_name, expected_model_name, expected_version, timeout_minutes=15, poll_interval_seconds=30):
+    """Wait for serving endpoint to be ready AND serving the expected model version."""
     print(f"⏳ Waiting for endpoint '{endpoint_name}' to be ready...")
+    print(f"   Expected: {expected_model_name} v{expected_version}")
 
     timeout_seconds = timeout_minutes * 60
     start_time = time.time()
@@ -681,20 +697,37 @@ def wait_for_endpoint_ready(client, endpoint_name, timeout_minutes=15, poll_inte
             endpoint = client.serving_endpoints.get(name=endpoint_name)
             state = endpoint.state
 
+            # Check if endpoint is ready
             if state and state.ready == EndpointStateReady.READY:
-                print(f"✅ Endpoint is ready! (took {int(elapsed)}s)")
-                return endpoint
+                # Verify the served model version
+                served_entities = endpoint.config.served_entities if endpoint.config else []
+                version_match = False
+                served_version = None
 
-            config_update = state.config_update if state else None
-            print(f"   Status: {state.ready if state else 'unknown'}, Config: {config_update} ({int(elapsed)}s elapsed)")
+                for entity in served_entities:
+                    served_version = entity.entity_version
+                    served_name = entity.entity_name
+                    if served_name == expected_model_name and served_version == str(expected_version):
+                        version_match = True
+                        break
+
+                if version_match:
+                    print(f"✅ Endpoint is ready with correct version! (took {int(elapsed)}s)")
+                    print(f"   Serving: {expected_model_name} v{expected_version}")
+                    return endpoint
+                else:
+                    print(f"   Endpoint ready but serving v{served_version}, waiting for v{expected_version}... ({int(elapsed)}s elapsed)")
+            else:
+                config_update = state.config_update if state else None
+                print(f"   Status: {state.ready if state else 'unknown'}, Config: {config_update} ({int(elapsed)}s elapsed)")
 
         except Exception as e:
             print(f"   Checking status... ({int(elapsed)}s elapsed): {e}")
 
         time.sleep(poll_interval_seconds)
 
-# Wait for endpoint to be ready
-wait_for_endpoint_ready(w, endpoint_name)
+# Wait for endpoint to be ready with the correct version
+wait_for_endpoint_ready(w, endpoint_name, UC_MODEL_NAME, model_version)
 
 print("\n🧪 Testing deployed endpoint...\n")
 
@@ -750,32 +783,43 @@ else:
 # MAGIC %md
 # MAGIC ## Summary
 # MAGIC
-# MAGIC This notebook deployed an **A2A-interoperable orchestrator agent** to Mosaic AI Framework:
+# MAGIC This notebook deployed an **A2A-interoperable orchestrator agent** to Mosaic AI Framework using **OBO (On-Behalf-Of) authentication**:
 # MAGIC
 # MAGIC | Component | Description |
 # MAGIC |-----------|-------------|
-# MAGIC | **Agent** | LangGraph ReAct agent with A2A SDK tools |
-# MAGIC | **Tools** | `discover_agents`, `get_agent_capabilities`, `call_a2a_agent`, `call_agent_via_gateway` |
+# MAGIC | **Agent** | LangGraph ReAct agent with A2A tools |
+# MAGIC | **Tools** | `discover_agents`, `call_agent_via_gateway`, `call_a2a_agent` |
+# MAGIC | **Auth** | OBO with `apps.apps` scope - uses caller's credentials |
 # MAGIC | **Registry** | Unity Catalog model: `{UC_MODEL_NAME}` |
 # MAGIC | **Endpoint** | Model Serving with autoscaling |
-# MAGIC | **Features** | Review App, inference tables, tracing |
 # MAGIC
-# MAGIC ### Key Capabilities
-# MAGIC
-# MAGIC 1. **Discoverable** - Deployed to Mosaic AI Model Serving
-# MAGIC 2. **Interoperable** - Can call other A2A agents via the official SDK
-# MAGIC 3. **Governed** - Access controlled via Unity Catalog
-# MAGIC 4. **Observable** - Inference tables and MLflow tracing
-# MAGIC
-# MAGIC ### Architecture
+# MAGIC ### OBO Authentication Flow
 # MAGIC
 # MAGIC ```
-# MAGIC User → Model Serving Endpoint → A2A Orchestrator Agent
-# MAGIC                                         │
-# MAGIC                                         ├── discover_agents() → A2A Gateway
-# MAGIC                                         ├── call_a2a_agent() → Any A2A Agent
-# MAGIC                                         └── call_agent_via_gateway() → Gateway → UC Access Control → Agent
+# MAGIC User Request
+# MAGIC     │
+# MAGIC     ▼
+# MAGIC Model Serving (OBO enabled)
+# MAGIC     │ User identity extracted at runtime
+# MAGIC     ▼
+# MAGIC Agent predict() (OBO initialized here)
+# MAGIC     │ WorkspaceClient with ModelServingUserCredentials
+# MAGIC     ▼
+# MAGIC A2A Gateway (Databricks App)
+# MAGIC     │ User must have CAN_QUERY on app
+# MAGIC     ▼
+# MAGIC Gateway checks UC Connection access
+# MAGIC     │ User must have USE_CONNECTION
+# MAGIC     ▼
+# MAGIC Downstream A2A Agents
 # MAGIC ```
+# MAGIC
+# MAGIC ### Key Benefits
+# MAGIC
+# MAGIC 1. **Per-user access control** - OBO ensures the caller's identity is used throughout
+# MAGIC 2. **UC-based authorization** - Gateway checks USE_CONNECTION privilege per agent
+# MAGIC 3. **Runtime credential initialization** - OBO set up in `predict()` when user identity is known
+# MAGIC 4. **Full traceability** - All calls are attributed to the original user
 
 # COMMAND ----------
 

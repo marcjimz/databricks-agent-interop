@@ -10,7 +10,26 @@ deploy:
 	@databricks apps deploy $(PREFIX)-a2a-gateway --source-code-path $(BUNDLE_PATH)/gateway --no-wait >/dev/null 2>&1 || true
 	@databricks apps deploy $(PREFIX)-echo-agent --source-code-path $(BUNDLE_PATH)/src/agents/echo --no-wait >/dev/null 2>&1 || true
 	@databricks apps deploy $(PREFIX)-calculator-agent --source-code-path $(BUNDLE_PATH)/src/agents/calculator --no-wait >/dev/null 2>&1 || true
-	@echo "Done. Run 'make status' to check."
+	@echo "Starting apps..."
+	@databricks apps start $(PREFIX)-a2a-gateway --no-wait >/dev/null 2>&1 || true
+	@databricks apps start $(PREFIX)-echo-agent --no-wait >/dev/null 2>&1 || true
+	@databricks apps start $(PREFIX)-calculator-agent --no-wait >/dev/null 2>&1 || true
+	@echo "Waiting for apps to be running..."
+	@for i in 1 2 3 4 5 6 7 8 9 10 11 12; do \
+		sleep 10; \
+		GW_STATE=$$(databricks apps get $(PREFIX)-a2a-gateway --output json 2>/dev/null | jq -r '.compute_status.state // "PENDING"'); \
+		ECHO_STATE=$$(databricks apps get $(PREFIX)-echo-agent --output json 2>/dev/null | jq -r '.compute_status.state // "PENDING"'); \
+		CALC_STATE=$$(databricks apps get $(PREFIX)-calculator-agent --output json 2>/dev/null | jq -r '.compute_status.state // "PENDING"'); \
+		echo "  gateway: $$GW_STATE, echo: $$ECHO_STATE, calculator: $$CALC_STATE"; \
+		if [ "$$GW_STATE" = "ACTIVE" ] && [ "$$ECHO_STATE" = "ACTIVE" ] && [ "$$CALC_STATE" = "ACTIVE" ]; then \
+			echo "✅ All apps running!"; \
+			break; \
+		fi; \
+		if [ $$i -eq 12 ]; then \
+			echo "⚠️  Timeout waiting for apps. Run 'make status' to check."; \
+		fi; \
+	done
+	@$(MAKE) status
 
 status:
 	@databricks apps get $(PREFIX)-a2a-gateway --output json 2>/dev/null | jq -r '"gateway: \(.compute_status.state) - \(.url)"' || echo "gateway: not found"

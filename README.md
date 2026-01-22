@@ -81,7 +81,7 @@ databricks connections create --json "{
 
 # Grant access
 databricks grants update connection "${PREFIX}-echo-a2a" \
-  --json '{"changes": [{"add": ["USE_CONNECTION"], "principal": "data-scientists"}]}'
+  --json '{"changes": [{"add": ["USE_CONNECTION"], "principal": "marcin.jimenez@databricks.com"}]}'
 ```
 
 ### External Agents (Different Tenant / No Entra ID)
@@ -418,6 +418,6 @@ python -m tests.run_tests --integration --prefix $PREFIX
 
 ## ToDos
 
-0. Move Agent Deploy orchestrator to Databricks Apps
+0. Implement custom MCP integration for model serving to access Databricks Apps: https://docs.databricks.com/aws/en/generative-ai/mcp/custom-mcp?language=Agent+code+%28on-behalf-of-user%29#connect-to-the-custom-mcp-server
 1. Implement auth flows for Gateway to Models (OBO through UC connections, app identity through to target infrastructure)
 2. Implement MLflow Tracing
