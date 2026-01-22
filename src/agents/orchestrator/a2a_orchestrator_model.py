@@ -14,21 +14,17 @@ from typing import Any
 SYSTEM_PROMPT = """You are an A2A Orchestrator Agent that can discover and communicate with other A2A-compliant agents.
 
 You have access to tools that let you:
-1. Discover available agents via the A2A Gateway
-2. Get details about any A2A agent's capabilities (agent card)
-3. Call any A2A agent to perform tasks
+1. Discover available agents via the A2A Gateway (use discover_agents)
+2. Get details about any A2A agent's capabilities (use get_agent_capabilities)
+3. Call any A2A agent to perform tasks (use call_agent_via_gateway or call_a2a_agent)
 
 When a user asks you to do something:
-1. First, determine if you need to use another agent
-2. If needed, discover available agents or get their capabilities
+1. First, use discover_agents to find what agents are available
+2. If needed, use get_agent_capabilities to understand an agent's skills
 3. Call the appropriate agent with the right message
 4. Return the result to the user
 
-Available agents typically include:
-- Echo Agent: Echoes back messages (useful for testing connectivity)
-- Calculator Agent: Performs arithmetic operations (add, subtract, multiply, divide)
-
-Be helpful and concise. When you receive results from other agents, summarize them clearly for the user.
+Always discover agents first rather than assuming what's available. Be helpful and concise.
 """
 
 
@@ -39,6 +35,38 @@ class A2AOrchestratorAgent(mlflow.pyfunc.PythonModel):
     This model can be deployed to Databricks Mosaic AI Framework using agents.deploy()
     and will be discoverable/callable via the Model Serving endpoint.
     """
+
+    def _get_auth_headers(self):
+        """Get authentication headers using OBO (On-Behalf-Of) user credentials.
+
+        This uses ModelServingUserCredentials to authenticate as the user making the request,
+        enabling fine-grained access control via Unity Catalog.
+        """
+        import os
+        try:
+            from databricks.sdk import WorkspaceClient
+            from databricks_ai_bridge.utils.credentials import ModelServingUserCredentials
+
+            # Use OBO credentials - authenticates as the user making the request
+            w = WorkspaceClient(credentials_strategy=ModelServingUserCredentials())
+            return dict(w.config.authenticate())
+        except ImportError:
+            # Fallback for local development (databricks_ai_bridge not installed)
+            try:
+                from databricks.sdk import WorkspaceClient
+                w = WorkspaceClient()
+                return dict(w.config.authenticate())
+            except Exception:
+                pass
+        except Exception as e:
+            # Fallback to manual token if OBO fails
+            pass
+
+        # Final fallback to environment variable
+        auth_token = self._model_config.get("auth_token", "") or os.environ.get("GATEWAY_AUTH_TOKEN", "")
+        if auth_token:
+            return {"Authorization": f"Bearer {auth_token}"}
+        return {}
 
     def load_context(self, context):
         """Initialize the agent when the model is loaded."""
@@ -53,7 +81,7 @@ class A2AOrchestratorAgent(mlflow.pyfunc.PythonModel):
         endpoint = model_config.get("foundation_model_endpoint", "databricks-meta-llama-3-1-8b-instruct")
         temperature = model_config.get("temperature", 0.1)
         max_tokens = model_config.get("max_tokens", 1000)
-        self.gateway_url = model_config.get("gateway_url", "")
+        self.gateway_url = model_config.get("gateway_url", "") or os.environ.get("GATEWAY_URL", "")
 
         # Initialize LLM
         self.llm = ChatDatabricks(
@@ -65,6 +93,9 @@ class A2AOrchestratorAgent(mlflow.pyfunc.PythonModel):
         # Store config for tools
         self._model_config = model_config
 
+        # Reference to self for nested functions
+        _self = self
+
         # Define A2A tools
         @tool
         def discover_agents() -> str:
@@ -73,15 +104,12 @@ class A2AOrchestratorAgent(mlflow.pyfunc.PythonModel):
             Returns a list of available agents with their names and descriptions.
             Use this when you need to know what agents are available.
             """
-            gateway_url = model_config.get("gateway_url", "")
-            auth_token = model_config.get("auth_token", "")
+            gateway_url = _self.gateway_url
 
             if not gateway_url:
                 return "Error: Gateway URL not configured"
 
-            headers = {}
-            if auth_token:
-                headers["Authorization"] = f"Bearer {auth_token}"
+            headers = _self._get_auth_headers()
 
             try:
                 with httpx.Client(timeout=30.0, headers=headers) as client:
@@ -114,13 +142,8 @@ class A2AOrchestratorAgent(mlflow.pyfunc.PythonModel):
             """
             from a2a.client import A2ACardResolver
 
-            auth_token = model_config.get("auth_token", "")
-
-            headers = {}
-            http_kwargs = {}
-            if auth_token:
-                headers["Authorization"] = f"Bearer {auth_token}"
-                http_kwargs["headers"] = headers
+            headers = _self._get_auth_headers()
+            http_kwargs = {"headers": headers} if headers else {}
 
             async def _get_card():
                 async with httpx.AsyncClient(timeout=30.0, headers=headers) as client:
@@ -171,11 +194,7 @@ class A2AOrchestratorAgent(mlflow.pyfunc.PythonModel):
             from a2a.types import Message, Part, TextPart
             from uuid import uuid4
 
-            auth_token = model_config.get("auth_token", "")
-
-            headers = {}
-            if auth_token:
-                headers["Authorization"] = f"Bearer {auth_token}"
+            headers = _self._get_auth_headers()
 
             async def _call_agent():
                 async with httpx.AsyncClient(timeout=60.0, headers=headers) as httpx_client:
@@ -241,16 +260,13 @@ class A2AOrchestratorAgent(mlflow.pyfunc.PythonModel):
             """
             from uuid import uuid4
 
-            gateway_url = model_config.get("gateway_url", "")
-            auth_token = model_config.get("auth_token", "")
+            gateway_url = _self.gateway_url
 
             if not gateway_url:
                 return "Error: Gateway URL not configured"
 
-            headers = {
-                "Authorization": f"Bearer {auth_token}",
-                "Content-Type": "application/json"
-            }
+            headers = _self._get_auth_headers()
+            headers["Content-Type"] = "application/json"
 
             # Create A2A message
             a2a_message = {

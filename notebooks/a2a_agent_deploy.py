@@ -223,25 +223,21 @@ llm = ChatDatabricks(
     max_tokens=1000
 )
 
-# System prompt
+# System prompt (matches the deployed model's prompt)
 SYSTEM_PROMPT = """You are an A2A Orchestrator Agent that can discover and communicate with other A2A-compliant agents.
 
 You have access to tools that let you:
-1. Discover available agents via the A2A Gateway
-2. Get details about any A2A agent's capabilities (agent card)
-3. Call any A2A agent to perform tasks
+1. Discover available agents via the A2A Gateway (use discover_agents)
+2. Get details about any A2A agent's capabilities (use get_agent_capabilities)
+3. Call any A2A agent to perform tasks (use call_agent_via_gateway or call_a2a_agent)
 
 When a user asks you to do something:
-1. First, determine if you need to use another agent
-2. If needed, discover available agents or get their capabilities
+1. First, use discover_agents to find what agents are available
+2. If needed, use get_agent_capabilities to understand an agent's skills
 3. Call the appropriate agent with the right message
 4. Return the result to the user
 
-Available agents typically include:
-- Echo Agent: Echoes back messages (useful for testing connectivity)
-- Calculator Agent: Performs arithmetic operations (add, subtract, multiply, divide)
-
-Be helpful and concise. When you receive results from other agents, summarize them clearly for the user.
+Always discover agents first rather than assuming what's available. Be helpful and concise.
 """
 
 # Define A2A tools
@@ -470,11 +466,22 @@ print(response["messages"][-1].content)
 # MAGIC %md
 # MAGIC ## 4. Log Agent to MLflow
 # MAGIC
-# MAGIC Using the MLflow 3.x "models from code" pattern.
+# MAGIC Using the MLflow 3.x "models from code" pattern with **OBO (On-Behalf-Of) authentication**.
+# MAGIC
+# MAGIC ### OBO Authentication
+# MAGIC
+# MAGIC The agent uses OBO auth to act on behalf of the user making the request. This enables:
+# MAGIC - Fine-grained access control via Unity Catalog
+# MAGIC - Per-user permissions when calling the A2A Gateway
+# MAGIC - Secure agent-to-agent communication with caller's identity
+# MAGIC
+# MAGIC **Requirement:** A workspace admin must enable OBO for AI agents. See [Agent Authentication](https://docs.databricks.com/aws/en/generative-ai/agent-framework/agent-authentication).
 
 # COMMAND ----------
 
 # DBTITLE 1,Log Agent to MLflow
+from mlflow.models.auth_policy import AuthPolicy, SystemAuthPolicy, UserAuthPolicy
+
 print("📦 Logging agent to MLflow...\n")
 
 # Model configuration
@@ -483,9 +490,18 @@ model_config = {
     "temperature": 0.1,
     "max_tokens": 1000,
     "gateway_url": GATEWAY_URL,
-    # Note: auth_token should be injected at runtime via service principal
-    # For now, we'll document this requirement
 }
+
+# OBO Auth Policy - enables the agent to act on behalf of the user
+# This allows fine-grained UC access control for A2A Gateway calls
+user_auth_policy = UserAuthPolicy(
+    api_scopes=[
+        "serving.serving-endpoints",  # For calling Databricks Apps (A2A Gateway)
+    ]
+)
+auth_policy = AuthPolicy(user_auth_policy=user_auth_policy)
+
+print("🔐 OBO Authentication enabled - agent will use caller's credentials")
 
 # Input example
 input_example = {
@@ -524,19 +540,22 @@ signature = mlflow.models.infer_signature(
 
 print(f"✅ Signature inferred")
 
-# Log the model
+# Log the model with OBO auth policy
 model_info = mlflow.pyfunc.log_model(
     artifact_path="agent",
     python_model="../src/agents/orchestrator/a2a_orchestrator_model.py",
     model_config=model_config,
     input_example=input_example,
     signature=signature,
+    auth_policy=auth_policy,  # Enable OBO authentication
     pip_requirements=[
         "mlflow>=3.1.0",
         "langchain>=0.3.0",
         "langchain-core>=0.3.0",
         "langgraph>=0.2.0",
         "databricks-langchain>=0.1.0",
+        "databricks-sdk>=0.40.0",
+        "databricks-ai-bridge>=0.3.0",  # Required for OBO auth (ModelServingUserCredentials)
         "a2a-sdk[http-server]>=0.3.0",
         "httpx>=0.27.0",
     ]
@@ -644,30 +663,57 @@ print(f"   3. Register as A2A agent via UC connection for full interoperability"
 
 # DBTITLE 1,Query the Deployed Agent
 import time
+from databricks.sdk.service.serving import EndpointStateReady, ChatMessage, ChatMessageRole
 
-print("⏳ Waiting for endpoint to warm up...")
-time.sleep(30)  # Give endpoint time to warm up
+def wait_for_endpoint_ready(client, endpoint_name, timeout_minutes=15, poll_interval_seconds=30):
+    """Wait for serving endpoint to be ready."""
+    print(f"⏳ Waiting for endpoint '{endpoint_name}' to be ready...")
+
+    timeout_seconds = timeout_minutes * 60
+    start_time = time.time()
+
+    while True:
+        elapsed = time.time() - start_time
+        if elapsed > timeout_seconds:
+            raise TimeoutError(f"Endpoint '{endpoint_name}' did not become ready within {timeout_minutes} minutes")
+
+        try:
+            endpoint = client.serving_endpoints.get(name=endpoint_name)
+            state = endpoint.state
+
+            if state and state.ready == EndpointStateReady.READY:
+                print(f"✅ Endpoint is ready! (took {int(elapsed)}s)")
+                return endpoint
+
+            config_update = state.config_update if state else None
+            print(f"   Status: {state.ready if state else 'unknown'}, Config: {config_update} ({int(elapsed)}s elapsed)")
+
+        except Exception as e:
+            print(f"   Checking status... ({int(elapsed)}s elapsed): {e}")
+
+        time.sleep(poll_interval_seconds)
+
+# Wait for endpoint to be ready
+wait_for_endpoint_ready(w, endpoint_name)
 
 print("\n🧪 Testing deployed endpoint...\n")
 
-# Query using the deployment endpoint
-try:
-    response = w.serving_endpoints.query(
-        name=endpoint_name,
-        messages=[
-            {"role": "user", "content": "What agents can you discover?"}
-        ]
-    )
+# Query using the deployment endpoint with ChatMessage objects
+response = w.serving_endpoints.query(
+    name=endpoint_name,
+    messages=[
+        ChatMessage(role=ChatMessageRole.USER, content="What agents can you discover?")
+    ]
+)
 
-    print("✅ Response from deployed agent:")
-    print("-" * 40)
-    if hasattr(response, 'choices') and response.choices:
-        print(response.choices[0].message.content)
-    else:
-        print(response)
-except Exception as e:
-    print(f"⚠️ Endpoint may still be warming up. Error: {e}")
-    print(f"\nTry again in a few minutes, or test via the Review App.")
+print("✅ Response from deployed agent:")
+print("-" * 40)
+if hasattr(response, 'choices') and response.choices:
+    print(response.choices[0].message.content)
+elif isinstance(response, dict) and 'choices' in response:
+    print(response['choices'][0]['message']['content'])
+else:
+    print(response)
 
 # COMMAND ----------
 

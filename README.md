@@ -380,77 +380,15 @@ The Assistant Agent is an orchestrator that can discover and use other agents au
 "First discover agents, then calculate 100 divided by 5"
 ```
 
-## Programmatic Access with Service Principals
+## Service Principal Authentication
 
-For automated or programmatic access to Databricks Apps (including the A2A Gateway and agents), use a Service Principal instead of user tokens.
+For programmatic/automated access to the A2A Gateway and agents from notebooks or scripts, use a Service Principal instead of user OAuth tokens.
 
-### 1. Create a Service Principal
-
-```bash
-# Create the service principal
-databricks service-principals create \
-  --display-name "a2a-gateway-sp" \
-  --application-id <your-entra-app-id>
-```
-
-Or via the Databricks UI: **Settings → Identity and access → Service principals → Add**.
-
-### 2. Generate OAuth Secret
-
-```bash
-# List service principals to get the ID
-databricks service-principals list
-
-# Create OAuth secret (note: secrets are shown only once)
-databricks service-principals secrets create <service-principal-id>
-```
-
-Save the `client_id` (application ID) and `client_secret` from the response.
-
-### 3. Grant App Access to the Service Principal
-
-```bash
-# Get the app's service principal ID
-APP_SP_ID=$(databricks apps get "${PREFIX}-a2a-gateway" --output json | jq -r '.service_principal_id')
-
-# Grant the SP permission to access the app
-databricks permissions update serving-endpoints "${PREFIX}-a2a-gateway" \
-  --json "{\"access_control_list\": [{\"service_principal_name\": \"a2a-gateway-sp\", \"permission_level\": \"CAN_QUERY\"}]}"
-```
-
-### 4. Use WorkspaceClient with Service Principal
-
-```python
-from databricks.sdk import WorkspaceClient
-import httpx
-
-# Initialize with SP credentials
-w = WorkspaceClient(
-    host="https://your-workspace.cloud.databricks.com",
-    client_id="<your-client-id>",
-    client_secret="<your-client-secret>"
-)
-
-# Get OAuth headers
-auth_headers = w.config.authenticate()
-
-# Call the A2A Gateway
-gateway_url = "https://your-a2a-gateway.databricksapps.com"
-with httpx.Client(headers=auth_headers) as client:
-    response = client.get(f"{gateway_url}/api/agents")
-    print(response.json())
-```
-
-### 5. Grant UC Connection Access to SP
-
-For the SP to access specific agents, grant `USE_CONNECTION` privilege:
-
-```bash
-databricks grants update connection "${PREFIX}-echo-a2a" \
-  --json '{"changes": [{"add": ["USE_CONNECTION"], "principal": "a2a-gateway-sp"}]}'
-```
-
-This enables fully automated agent-to-agent communication without user intervention.
+See **[notebooks/README.md](notebooks/README.md#programmatic-access-with-service-principals)** for detailed instructions on:
+- Creating a Service Principal
+- Generating OAuth secrets
+- Granting app and UC connection access
+- Using `WorkspaceClient` with SP credentials
 
 ## Testing
 
@@ -477,3 +415,8 @@ python -m tests.run_tests --integration --prefix $PREFIX
 | Integration: Gateway | 13 | Health, discovery, auth (valid/invalid tokens) |
 | Integration: A2A Compliance | 25 | Agent card, JSON-RPC, task states, streaming |
 | Integration: Access Control | 3 | Grant/revoke USE_CONNECTION workflow |
+
+## ToDos
+
+1. Implement auth flows for Gateway to Models (OBO through UC connections, app identity through to target infrastructure)
+2. Implement MLflow Tracing
