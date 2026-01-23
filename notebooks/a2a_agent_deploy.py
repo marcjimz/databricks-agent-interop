@@ -41,7 +41,7 @@
 # COMMAND ----------
 
 # DBTITLE 1,Install Dependencies
-# MAGIC %pip install mlflow>=3.1.0 databricks-agents>=0.12.0 langchain>=0.3.0 langchain-core>=0.3.0 langgraph>=0.2.0 databricks-langchain>=0.1.0 a2a-sdk[http-server]>=0.3.0 httpx nest_asyncio pyyaml --quiet
+# MAGIC %pip install mlflow>=3.8.0 databricks-agents>=1.9.0 langchain>=1.0.0 langchain-core>=1.0.0 langgraph>=1.0.0 databricks-langchain>=0.13.0 databricks-sdk>=0.78.0 databricks-ai-bridge>=0.10.0 a2a-sdk[http-server]>=0.3.20 httpx>=0.28.0 nest_asyncio pyyaml --quiet
 
 # COMMAND ----------
 
@@ -502,7 +502,7 @@ auth_policy = AuthPolicy(
 )
 
 print("🔐 Auth Policy configured:")
-print(f"   System resources: {[r.endpoint_name for r in resources]}")
+print(f"   System resources: [{FOUNDATION_MODEL}]")
 print(f"   User scopes (OBO): {user_auth_policy.api_scopes}")
 
 # Debug: verify auth_policy object
@@ -511,7 +511,7 @@ print(f"   Type: {type(auth_policy)}")
 print(f"   Has system_auth_policy: {auth_policy.system_auth_policy is not None}")
 print(f"   Has user_auth_policy: {auth_policy.user_auth_policy is not None}")
 if auth_policy.system_auth_policy:
-    print(f"   System resources: {[r.endpoint_name for r in auth_policy.system_auth_policy.resources]}")
+    print(f"   System resources: {len(auth_policy.system_auth_policy.resources)} endpoint(s)")
 if auth_policy.user_auth_policy:
     print(f"   User scopes: {auth_policy.user_auth_policy.api_scopes}")
 
@@ -565,15 +565,15 @@ with mlflow.start_run() as run:
         signature=signature,
         auth_policy=auth_policy,  # Enable OBO authentication
         pip_requirements=[
-            "mlflow>=3.1.0",
-            "langchain>=0.3.0",
-            "langchain-core>=0.3.0",
-            "langgraph>=0.2.0",
-            "databricks-langchain>=0.1.0",
-            "databricks-sdk>=0.40.0",
-            "databricks-ai-bridge>=0.1.0",  # For ModelServingUserCredentials
-            "a2a-sdk>=0.3.0",
-            "httpx>=0.27.0",
+            "mlflow>=3.8.0",
+            "langchain>=1.0.0",
+            "langchain-core>=1.0.0",
+            "langgraph>=1.0.0",
+            "databricks-langchain>=0.13.0",
+            "databricks-sdk>=0.78.0",
+            "databricks-ai-bridge>=0.10.0",  # For ModelServingUserCredentials
+            "a2a-sdk>=0.3.20",
+            "httpx>=0.28.0",
         ]
     )
 
@@ -590,22 +590,6 @@ with mlflow.start_run() as run:
     mlflow.set_tag("a2a_compliant", "true")
     mlflow.set_tag("uses_obo", "true")
     mlflow.set_tag("created_by", username)
-
-print(f"\n✅ Agent logged to MLflow")
-print(f"   Run ID: {run_id}")
-print(f"   Model URI: {model_uri}")
-
-# Verify auth_policy was logged
-client = mlflow.tracking.MlflowClient()
-print(f"\n📂 Model artifacts:")
-artifacts = client.list_artifacts(run_id, "agent")
-for a in artifacts:
-    print(f"   - {a.path}")
-auth_policy_found = any("auth_policy" in a.path for a in artifacts)
-if auth_policy_found:
-    print(f"\n   ✅ auth_policy.yaml found - OBO configured")
-else:
-    print(f"   ❌ auth_policy.yaml NOT found - OBO may not work!")
 
 # COMMAND ----------
 

@@ -1,0 +1,148 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#FF3621', 'primaryTextColor': '#000', 'primaryBorderColor': '#E65100', 'lineColor': '#37474F', 'secondaryColor': '#E3F2FD', 'tertiaryColor': '#FFF3E0', 'background': '#FAFAFA', 'mainBkg': '#FFFFFF', 'nodeBorder': '#90A4AE', 'clusterBkg': '#F5F5F5', 'clusterBorder': '#CFD8DC', 'titleColor': '#263238', 'edgeLabelBackground': '#EEEEEE', 'tertiaryTextColor': '#000000'}}}%%
+
+flowchart TB
+    subgraph CLIENTS["👤 Databricks Consumer Applications"]
+        direction TB
+        NOTEBOOK["📓 Databricks Notebook<br/>Interactive Testing"]
+        REVIEW_APP["🔍 Review App<br/>Agent Playground"]
+        EXTERNAL["🌐 External App<br/>REST API Client"]
+    end
+
+    subgraph EXT_A2A_CLIENTS["🏢 External A2A Clients"]
+        direction TB
+        SERVICENOW["🎫 ServiceNow<br/>IT Service Management"]
+        SALESFORCE["💼 Salesforce<br/>CRM Platform"]
+        WORKDAY["👥 Workday<br/>HR & Finance"]
+        OTHER_EXT["🔌 Other A2A Clients<br/>Any Compliant System"]
+    end
+
+    subgraph ORCHESTRATOR["⚠️ EXAMPLE: A2A Orchestrator Agent - A2A Compliant Application"]
+        direction TB
+        MODEL_SERVING["⚡ Model Serving Endpoint<br/>Mosaic AI Agent Framework"]
+        subgraph AI_GATEWAY["🛡️ AI Gateway"]
+            GUARDRAILS["Guardrails<br/>Input/Output Safety"]
+            RATE_LIMIT["Rate Limiting<br/>Token Budgets"]
+            ROUTING["Routing & Filtering<br/>Request Management"]
+        end
+        subgraph OBO_AUTH["🔐 OBO Authentication"]
+            USER_CREDS["ModelServingUserCredentials<br/>Caller Identity Extraction"]
+            AUTH_POLICY["AuthPolicy<br/>apps.apps Scope"]
+        end
+        subgraph AGENT_TOOLS["🛠️ LangGraph Tools"]
+            DISCOVER["discover_agents()<br/>List Available Agents"]
+            CALL_AGENT["call_agent()<br/>Send A2A Messages"]
+        end
+        LLM["🤖 Foundation Model<br/>Llama 3.1 8B Instruct"]
+        subgraph OBSERVABILITY["📊 Observability"]
+            INF_TABLES["Inference Tables<br/>Request/Response Logs"]
+            MLFLOW_TRACES["MLflow Traces<br/>End-to-End Visibility"]
+        end
+        subgraph MLFLOW["📊 Databricks MLflow Registry"]
+            MODEL_REG["Unity Catalog Model<br/>a2a_orchestrator"]
+            AUTH_YAML["auth_policy.yaml<br/>OBO Configuration"]
+            TRACES["MLflow Traces<br/>Observability"]
+        end
+    end
+
+    subgraph GATEWAY["🚪 A2A Gateway"]
+        direction TB
+        FASTAPI["A2A Gateway<br/>Powered by Databricks Apps"]
+        subgraph SERVICES["📦 Gateway Services"]
+            DISCOVERY_SVC["Discovery Service<br/>List UC Connections"]
+            PROXY_SVC["Proxy Service<br/>Forward A2A Requests"]
+            GOVERNANCE["🔒 Governance<br/>Powered by UC"]
+        end
+        SWAGGER["📄 OpenAPI / Swagger<br/>A2A JSON-RPC Schema"]
+    end
+
+    subgraph UC["🏛️ Unity Catalog"]
+        direction LR
+        subgraph CONNECTIONS["🔗 HTTP Connections"]
+            CONN_PATTERN["*-a2a naming pattern<br/>host + base_path"]
+            CONN_CREDS["Optional Credentials<br/>OAuth M2M / API Key"]
+        end
+        PERMISSIONS["🔒 Permissions<br/>USE_CONNECTION"]
+    end
+
+    subgraph AGENTS["🤖 A2A Compliant Agent Structure"]
+        direction TB
+        subgraph AGENT_STRUCTURE["Agent Components"]
+            AGENT_HOST["🌐 Agent Host<br/>Databricks App / External"]
+            AGENT_CARD["📋 /.well-known/agent.json<br/>Agent Card (Capabilities)"]
+            AGENT_ENDPOINT["📨 /message Endpoint<br/>JSON-RPC 2.0"]
+            AGENT_STREAM["📡 /stream Endpoint<br/>SSE Streaming"]
+        end
+        AGENT_EXAMPLES["Examples: Databricks Apps,<br/>Google ADK, AWS Bedrock,<br/>Custom A2A Servers"]
+    end
+
+    %% Client to Orchestrator flows
+    NOTEBOOK -->|Query Endpoint| MODEL_SERVING
+    REVIEW_APP -->|Chat Interface| MODEL_SERVING
+    EXTERNAL -->|REST API| MODEL_SERVING
+
+    %% External A2A Clients to Gateway (A2A Protocol)
+    SERVICENOW -->|A2A Protocol<br/>JSON-RPC 2.0| FASTAPI
+    SALESFORCE -->|A2A Protocol<br/>JSON-RPC 2.0| FASTAPI
+    WORKDAY -->|A2A Protocol<br/>JSON-RPC 2.0| FASTAPI
+    OTHER_EXT -.->|A2A Protocol| FASTAPI
+
+    %% AI Gateway protection
+    MODEL_SERVING --> AI_GATEWAY
+    GUARDRAILS --> RATE_LIMIT
+    RATE_LIMIT --> ROUTING
+
+    %% Orchestrator internal flow
+    ROUTING --> USER_CREDS
+    USER_CREDS --> AUTH_POLICY
+    AUTH_POLICY -->|OBO Token| AGENT_TOOLS
+    DISCOVER <--> LLM
+    CALL_AGENT <--> LLM
+
+    %% Observability
+    AI_GATEWAY -.->|Log| INF_TABLES
+    AGENT_TOOLS -.->|Trace| MLFLOW_TRACES
+
+    %% Orchestrator to Gateway
+    AGENT_TOOLS -->|Bearer Token<br/>A2A JSON-RPC| FASTAPI
+
+    %% Gateway internal flow
+    FASTAPI --> SERVICES
+    DISCOVERY_SVC -->|OBO| CONNECTIONS
+    GOVERNANCE -.->|Access Control| CONNECTIONS
+
+    %% UC permissions
+    CONNECTIONS --- PERMISSIONS
+
+    %% Gateway to Agents
+    PROXY_SVC -->|Fetch| AGENT_CARD
+    PROXY_SVC -->|Send Message| AGENT_ENDPOINT
+    PROXY_SVC -.->|Stream| AGENT_STREAM
+
+    %% MLflow integration
+    MODEL_SERVING -.->|Logged From| MODEL_REG
+    AUTH_YAML -.->|Enables| OBO_AUTH
+    MODEL_SERVING -.->|Emit| TRACES
+
+    %% Styling
+    classDef clientStyle fill:#E8F5E9,stroke:#2E7D32,stroke-width:2px,color:#1B5E20
+    classDef orchestratorStyle fill:#DCEDC8,stroke:#689F38,stroke-width:3px,stroke-dasharray:5 5,color:#33691E
+    classDef gatewayStyle fill:#FFE0B2,stroke:#FF6F00,stroke-width:3px,color:#E65100
+    classDef ucStyle fill:#E3F2FD,stroke:#1565C0,stroke-width:2px,color:#0D47A1
+    classDef agentStyle fill:#F3E5F5,stroke:#7B1FA2,stroke-width:2px,color:#4A148C
+    classDef mlflowStyle fill:#FFF3E0,stroke:#EF6C00,stroke-width:2px,color:#E65100
+    classDef authStyle fill:#FFEBEE,stroke:#C62828,stroke-width:2px,color:#B71C1C
+    classDef aiGatewayStyle fill:#E1F5FE,stroke:#0277BD,stroke-width:2px,color:#01579B
+    classDef observabilityStyle fill:#FCE4EC,stroke:#AD1457,stroke-width:2px,color:#880E4F
+    classDef extA2AStyle fill:#FFF8E1,stroke:#F9A825,stroke-width:2px,color:#F57F17
+
+    class NOTEBOOK,REVIEW_APP,EXTERNAL clientStyle
+    class SERVICENOW,SALESFORCE,WORKDAY,OTHER_EXT extA2AStyle
+    class MODEL_SERVING,DISCOVER,CALL_AGENT,LLM orchestratorStyle
+    class FASTAPI,DISCOVERY_SVC,PROXY_SVC,SWAGGER gatewayStyle
+    class CONN_PATTERN,CONN_CREDS,PERMISSIONS ucStyle
+    class AGENT_HOST,AGENT_CARD,AGENT_ENDPOINT,AGENT_STREAM,AGENT_EXAMPLES agentStyle
+    class MODEL_REG,AUTH_YAML,TRACES mlflowStyle
+    class USER_CREDS,AUTH_POLICY authStyle
+    class GOVERNANCE ucStyle
+    class GUARDRAILS,RATE_LIMIT,ROUTING aiGatewayStyle
+    class INF_TABLES,MLFLOW_TRACES observabilityStyle

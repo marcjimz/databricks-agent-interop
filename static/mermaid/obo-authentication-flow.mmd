@@ -1,0 +1,56 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#FF3621', 'primaryTextColor': '#000', 'primaryBorderColor': '#E65100', 'lineColor': '#37474F', 'secondaryColor': '#E3F2FD', 'tertiaryColor': '#FFF3E0', 'background': '#FAFAFA', 'mainBkg': '#FFFFFF', 'nodeBorder': '#90A4AE', 'clusterBkg': '#F5F5F5', 'clusterBorder': '#CFD8DC', 'titleColor': '#263238', 'edgeLabelBackground': '#EEEEEE', 'tertiaryTextColor': '#000000'}}}%%
+
+sequenceDiagram
+    autonumber
+    participant User as 👤 User
+    participant Client as 📱 Client App
+    participant Orchestrator as 🧠 Orchestrator<br/>(Model Serving)
+    participant Gateway as 🚪 A2A Gateway<br/>(Databricks App)
+    participant UC as 🏛️ Unity Catalog
+    participant Agent as 🤖 A2A Agent<br/>(Databricks App)
+
+    Note over User,Agent: OBO (On-Behalf-Of) Authentication Flow
+
+    rect rgb(232, 245, 233)
+        Note over User,Client: 1️⃣ User Authentication
+        User->>Client: Login to Databricks
+        Client->>Client: Obtain OAuth Token
+    end
+
+    rect rgb(220, 237, 200)
+        Note over Client,Orchestrator: 2️⃣ Orchestrator OBO
+        Client->>+Orchestrator: Query with Bearer Token
+        Note right of Orchestrator: ModelServingUserCredentials()<br/>extracts user identity<br/>in predict() at runtime
+        Orchestrator->>Orchestrator: Initialize OBO<br/>WorkspaceClient with<br/>user credentials
+        Note right of Orchestrator: auth_policy.yaml enables<br/>apps.apps scope for OBO
+    end
+
+    rect rgb(255, 224, 178)
+        Note over Orchestrator,Gateway: 3️⃣ Gateway OBO
+        Orchestrator->>+Gateway: POST /api/agents<br/>Authorization: Bearer {user_token}
+        Gateway->>Gateway: extract_token_from_request()
+        Gateway->>Gateway: create_obo_client(token)
+        Note right of Gateway: WorkspaceClient uses<br/>user's token for all<br/>SDK operations
+    end
+
+    rect rgb(227, 242, 253)
+        Note over Gateway,UC: 4️⃣ UC Permission Check
+        Gateway->>+UC: connections.list()<br/>(as user via OBO)
+        UC->>UC: Filter by user permissions
+        Note right of UC: Only returns connections<br/>user has USE_CONNECTION on
+        UC-->>-Gateway: Filtered connection list
+    end
+
+    rect rgb(243, 229, 245)
+        Note over Gateway,Agent: 5️⃣ Agent Communication
+        Gateway->>+Agent: POST /message<br/>A2A JSON-RPC
+        Note right of Agent: Agent receives request<br/>with proper auth context
+        Agent->>Agent: Process message
+        Agent-->>-Gateway: A2A Response
+    end
+
+    Gateway-->>-Orchestrator: Agent Response
+    Orchestrator->>Orchestrator: LLM processes result
+    Orchestrator-->>-Client: Final Response
+
+    Note over User,Agent: ✅ User identity preserved through entire flow

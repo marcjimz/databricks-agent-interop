@@ -1,7 +1,16 @@
 """Gateway data models."""
 
 from .agent import AgentInfo, OAuthM2MCredentials
-from .responses import HealthResponse, AgentListResponse, ErrorResponse, ProxyRequest
+from .responses import (
+    HealthResponse,
+    AgentListResponse,
+    ErrorResponse,
+    ProxyRequest,
+    A2AJsonRpcRequest,
+    A2AMessage,
+    A2AMessageParams,
+    TextPart,
+)
 
 __all__ = [
     "AgentInfo",
@@ -10,4 +19,8 @@ __all__ = [
     "AgentListResponse",
     "ErrorResponse",
     "ProxyRequest",
+    "A2AJsonRpcRequest",
+    "A2AMessage",
+    "A2AMessageParams",
+    "TextPart",
 ]

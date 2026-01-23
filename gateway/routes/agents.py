@@ -4,12 +4,13 @@ Uses OBO (On-Behalf-Of) authentication to list and access agents
 as the calling user, respecting Unity Catalog permissions.
 """
 
+import json
 import logging
 
 from fastapi import APIRouter, Request, HTTPException, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from models import AgentListResponse, AgentInfo
+from models import AgentListResponse, AgentInfo, A2AJsonRpcRequest
 from services import get_discovery, get_proxy_service, extract_token_from_request
 
 logger = logging.getLogger(__name__)
@@ -77,10 +78,26 @@ async def get_agent_card(agent_name: str, request: Request):
 
 
 @router.post("/{agent_name}/message")
-async def send_message(agent_name: str, request: Request):
+async def send_message(agent_name: str, request: Request, body: A2AJsonRpcRequest = None):
     """Send a message to an A2A agent.
 
     Proxies the JSON-RPC request to the agent's endpoint URL (from agent card).
+
+    The request body should be a JSON-RPC 2.0 message in A2A format:
+    ```json
+    {
+      "jsonrpc": "2.0",
+      "id": "req-123",
+      "method": "message/send",
+      "params": {
+        "message": {
+          "messageId": "msg-456",
+          "role": "user",
+          "parts": [{"kind": "text", "text": "Your message here"}]
+        }
+      }
+    }
+    ```
     """
     auth_token = extract_token_from_request(request)
     discovery = get_discovery(auth_token=auth_token)
@@ -93,11 +110,15 @@ async def send_message(agent_name: str, request: Request):
             detail=f"Agent '{agent_name}' not found"
         )
 
-    # Get request body
-    body = await request.body()
+    # Get request body - use the Pydantic model if provided, otherwise read raw body
+    if body:
+        raw_body = json.dumps(body.model_dump()).encode()
+    else:
+        raw_body = await request.body()
+
     content_type = request.headers.get("content-type", "application/json")
 
-    response = await proxy_service.send_message(agent, request, body, content_type)
+    response = await proxy_service.send_message(agent, request, raw_body, content_type)
 
     # Handle response
     try:
@@ -112,10 +133,26 @@ async def send_message(agent_name: str, request: Request):
 
 
 @router.post("/{agent_name}/stream")
-async def stream_message(agent_name: str, request: Request):
+async def stream_message(agent_name: str, request: Request, body: A2AJsonRpcRequest = None):
     """Send a streaming message to an A2A agent.
 
     Proxies the request and streams SSE responses back.
+
+    The request body should be a JSON-RPC 2.0 message in A2A format:
+    ```json
+    {
+      "jsonrpc": "2.0",
+      "id": "req-123",
+      "method": "message/send",
+      "params": {
+        "message": {
+          "messageId": "msg-456",
+          "role": "user",
+          "parts": [{"kind": "text", "text": "Your message here"}]
+        }
+      }
+    }
+    ```
     """
     auth_token = extract_token_from_request(request)
     discovery = get_discovery(auth_token=auth_token)
@@ -128,9 +165,13 @@ async def stream_message(agent_name: str, request: Request):
             detail=f"Agent '{agent_name}' not found"
         )
 
-    body = await request.body()
+    # Get request body - use the Pydantic model if provided, otherwise read raw body
+    if body:
+        raw_body = json.dumps(body.model_dump()).encode()
+    else:
+        raw_body = await request.body()
 
     return StreamingResponse(
-        proxy_service.stream_message(agent, request, body),
+        proxy_service.stream_message(agent, request, raw_body),
         media_type="text/event-stream"
     )
