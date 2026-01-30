@@ -1,26 +1,16 @@
 """Integration tests for access control scenarios.
 
-NOTE: These tests are for the OLD authorization model where the gateway
-explicitly checked USE_CONNECTION permissions. With OBO (On-Behalf-Of)
-authentication, access control works differently:
+Tests that the gateway properly enforces USE_CONNECTION permission.
+With OBO (On-Behalf-Of) authentication:
 
 1. The gateway uses the caller's token via OBO
-2. The Databricks SDK automatically filters connections based on user permissions
-3. Users simply don't see connections they can't access (no explicit 403)
-
-These tests are SKIPPED because they don't apply to the OBO model.
+2. Discovery checks USE_CONNECTION for each connection - users only see accessible agents
+3. Direct agent access returns 403 Forbidden if user lacks USE_CONNECTION
 """
 
 import pytest
 import time
 from tests.conftest import make_a2a_message
-
-
-# Skip all tests in this module - they test the old authorization model
-pytestmark = pytest.mark.skip(
-    reason="Access control tests are for the old authorization model. "
-           "With OBO, the Databricks SDK handles access control automatically."
-)
 
 
 class TestAccessControlWorkflow:
@@ -96,6 +86,8 @@ class TestAccessControlWorkflow:
 
         NOTE: This test only works on connections where the current user
         is NOT the owner. Owners always have access regardless of grants.
+
+        Without USE_CONNECTION, direct access returns 403 Forbidden.
         """
         if not self.testable_connections:
             pytest.skip(
@@ -118,11 +110,13 @@ class TestAccessControlWorkflow:
         self._revoke_access(conn_name)
         assert not self._check_grants(conn_name), "Grant should be removed"
 
-        # Step 2: Verify access denied
-        print("=== Step 2: Verifying access denied ===")
+        # Step 2: Verify 403 Forbidden
+        print("=== Step 2: Verifying 403 Forbidden ===")
         resp = http_client.post(endpoint, json=message)
-        assert resp.status_code == 403, f"Expected 403, got {resp.status_code}: {resp.text}"
-        assert "error" in resp.json()
+        assert resp.status_code == 403, f"Expected 403 Forbidden, got {resp.status_code}: {resp.text}"
+        data = resp.json()
+        assert "error" in data, "Response should have error field"
+        assert "USE_CONNECTION" in data["error"], "Error should mention USE_CONNECTION"
 
         # Step 3: Grant access
         print("=== Step 3: Granting access ===")
@@ -140,8 +134,8 @@ class TestAccessControlWorkflow:
         print("=== Step 5: Revoking access again ===")
         self._revoke_access(conn_name)
 
-        # Step 6: Verify access denied again
-        print("=== Step 6: Verifying access denied again ===")
+        # Step 6: Verify 403 Forbidden again
+        print("=== Step 6: Verifying 403 Forbidden again ===")
         resp = http_client.post(endpoint, json=message)
         assert resp.status_code == 403, f"Expected 403, got {resp.status_code}"
 
@@ -155,8 +149,11 @@ class TestAccessControlWorkflow:
 class TestAccessDeniedResponse:
     """Tests for access denied error responses."""
 
-    def test_403_error_format(self, http_client, gateway_url, workspace_client, prefix, current_user):
-        """Test that 403 errors have proper format.
+    def test_403_forbidden_when_no_access(self, http_client, gateway_url, workspace_client, prefix, current_user):
+        """Test that agents without access return 403 Forbidden.
+
+        When user lacks USE_CONNECTION privilege, they get a clear 403 error
+        explaining that they need USE_CONNECTION on the connection.
 
         NOTE: This test only works on connections where the current user
         is NOT the owner. Owners always have access regardless of grants.
@@ -197,7 +194,8 @@ class TestAccessDeniedResponse:
                 json=message
             )
 
-            assert response.status_code == 403, f"Expected 403, got {response.status_code}"
+            # Expect 403 Forbidden with clear error message
+            assert response.status_code == 403, f"Expected 403 Forbidden, got {response.status_code}"
             data = response.json()
             assert "error" in data
             assert "USE_CONNECTION" in data["error"]

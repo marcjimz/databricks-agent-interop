@@ -13,6 +13,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.openapi.utils import get_openapi
 
 from config import settings
 from services import get_proxy_service
@@ -43,10 +45,23 @@ app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
     description="A2A Gateway for Databricks - Agent Discovery and Proxying",
-    docs_url="/docs",
+    docs_url=None,  # Disable default docs, we'll create custom one
     redoc_url="/redoc",
     lifespan=lifespan
 )
+
+
+@app.get("/docs", include_in_schema=False)
+async def custom_swagger_ui_html():
+    """Custom Swagger UI that includes credentials with requests."""
+    return get_swagger_ui_html(
+        openapi_url="/openapi.json",
+        title=f"{settings.app_name} - Swagger UI",
+        swagger_ui_parameters={
+            "withCredentials": True,  # Include cookies/credentials with requests
+            "persistAuthorization": True,
+        }
+    )
 
 # CORS middleware
 app.add_middleware(
@@ -90,6 +105,54 @@ async def global_exception_handler(request: Request, exc: Exception):
 # Include routers
 app.include_router(health_router)
 app.include_router(agents_router)
+
+
+# Custom OpenAPI schema with security configuration
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+
+    openapi_schema = get_openapi(
+        title=settings.app_name,
+        version=settings.app_version,
+        description="""
+## A2A Gateway for Databricks
+
+This gateway discovers and proxies to A2A-compliant agents registered via Unity Catalog connections.
+
+### Authentication
+
+**When deployed as a Databricks App:** Authentication is handled automatically via Databricks OAuth.
+Your identity is passed via the `x-forwarded-email` header by the Databricks Apps proxy.
+Simply access this Swagger UI while logged into your Databricks workspace.
+
+**When calling via API/curl:** Include your Databricks OAuth token in the Authorization header:
+```
+Authorization: Bearer <your-databricks-token>
+```
+
+### Agent Access Control
+
+Agents are filtered by Unity Catalog connection permissions. You will only see and be able to
+access agents where you have `USE_CONNECTION` privilege on the corresponding UC connection.
+""",
+        routes=app.routes,
+    )
+
+    # Add security scheme for external API calls
+    openapi_schema["components"]["securitySchemes"] = {
+        "BearerAuth": {
+            "type": "http",
+            "scheme": "bearer",
+            "description": "Databricks OAuth token (for API/curl access)"
+        }
+    }
+
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+
+app.openapi = custom_openapi
 
 
 # =============================================================================

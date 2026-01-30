@@ -26,22 +26,17 @@
 # MAGIC
 # MAGIC Default values are loaded from `notebooks/settings.yaml`. You can override any value using the widgets above.
 # MAGIC
-# MAGIC ### Getting an OAuth Token
+# MAGIC ### OBO Authentication
 # MAGIC
-# MAGIC Databricks Apps require OAuth authentication. Run this command locally to get a token:
-# MAGIC
-# MAGIC ```bash
-# MAGIC databricks auth token --host "${DATABRICKS_HOST}"
-# MAGIC ```
-# MAGIC
-# MAGIC Copy the token and paste it into the **access_token** widget (or `settings.yaml` for persistence).
-# MAGIC
-# MAGIC > **Note:** Tokens expire after ~1 hour. If you get 401/302 errors, generate a new token.
+# MAGIC This notebook deploys an agent with **OBO (On-Behalf-Of) authentication**. When deployed:
+# MAGIC - The agent uses the **calling user's identity** to access the A2A Gateway
+# MAGIC - No OAuth tokens need to be configured in advance
+# MAGIC - Access control is enforced via Unity Catalog permissions
 
 # COMMAND ----------
 
 # DBTITLE 1,Install Dependencies
-# MAGIC %pip install mlflow>=3.8.0 databricks-agents>=1.9.0 langchain>=1.0.0 langchain-core>=1.0.0 langgraph>=1.0.0 databricks-langchain>=0.13.0 databricks-sdk>=0.78.0 databricks-ai-bridge>=0.10.0 a2a-sdk[http-server]>=0.3.20 httpx>=0.28.0 nest_asyncio pyyaml --quiet
+# MAGIC %pip install mlflow>=3.8.0 databricks-agents>=1.9.0 langchain>=1.0.0 langchain-core>=1.0.0 langgraph>=1.0.0 databricks-langchain>=0.13.0 databricks-sdk>=0.78.0 databricks-ai-bridge>=0.10.0 a2a-sdk[http-server]>=0.3.20 httpx>=0.28.0 pyyaml --quiet
 
 # COMMAND ----------
 
@@ -80,7 +75,6 @@ dbutils.widgets.text("workspace_url_suffix", settings.get("workspace_url_suffix"
 dbutils.widgets.text("catalog", settings.get("catalog", "main"), "Catalog Name")
 dbutils.widgets.text("schema", settings.get("schema", "default"), "Schema Name")
 dbutils.widgets.text("foundation_model", settings.get("foundation_model", "databricks-meta-llama-3-1-8b-instruct"), "Foundation Model")
-dbutils.widgets.text("access_token", settings.get("access_token", ""), "OAuth Access Token")
 
 # COMMAND ----------
 
@@ -89,11 +83,6 @@ import mlflow
 from databricks import agents
 from databricks.sdk import WorkspaceClient
 from datetime import datetime
-import json
-
-# Enable nested event loops (required for Databricks notebooks)
-import nest_asyncio
-nest_asyncio.apply()
 
 # Initialize Databricks client
 w = WorkspaceClient()
@@ -104,29 +93,13 @@ WORKSPACE_URL_SUFFIX = dbutils.widgets.get("workspace_url_suffix")
 CATALOG = dbutils.widgets.get("catalog")
 SCHEMA = dbutils.widgets.get("schema")
 FOUNDATION_MODEL = dbutils.widgets.get("foundation_model")
-ACCESS_TOKEN = dbutils.widgets.get("access_token")
-
-# Validate access token
-if not ACCESS_TOKEN:
-    raise ValueError(
-        "access_token widget is empty!\n\n"
-        "To get a token, run this command locally:\n"
-        "  databricks auth token --host \"${DATABRICKS_HOST}\"\n\n"
-        "Then paste the token into the 'access_token' widget above and re-run this cell.\n"
-        "For persistence, add it to settings.yaml."
-    )
-
-# Build auth headers from the token
-AUTH_HEADERS = {"Authorization": f"Bearer {ACCESS_TOKEN}"}
 
 # Get current user
 username = spark.sql("SELECT current_user()").first()[0]
 normalized_username = username.split('@')[0].replace('.', '_')
 
-# Build URLs from prefix and workspace suffix
+# Build gateway URL from prefix and workspace suffix
 GATEWAY_URL = f"https://{PREFIX}-a2a-gateway{WORKSPACE_URL_SUFFIX}"
-ECHO_AGENT_URL = f"https://{PREFIX}-echo-agent{WORKSPACE_URL_SUFFIX}"
-CALC_AGENT_URL = f"https://{PREFIX}-calculator-agent{WORKSPACE_URL_SUFFIX}"
 
 # Unity Catalog model name
 AGENT_NAME = "a2a_orchestrator"
@@ -137,7 +110,6 @@ print(f"📍 Unity Catalog Model: {UC_MODEL_NAME}")
 print(f"👤 User: {username}")
 print(f"🤖 Foundation Model: {FOUNDATION_MODEL}")
 print(f"🌐 Gateway URL: {GATEWAY_URL}")
-print(f"🔑 Auth Token: ✓ Configured ({len(ACCESS_TOKEN)} chars)")
 
 # COMMAND ----------
 
@@ -173,285 +145,7 @@ print(f"   Experiment ID: {experiment_id}")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 2. Build the A2A Orchestrator Agent
-# MAGIC
-# MAGIC The agent uses LangGraph with tools that call the A2A Gateway directly via HTTP.
-# MAGIC When deployed with OBO authentication, these calls use the caller's credentials.
-
-# COMMAND ----------
-
-# DBTITLE 1,Build Agent with A2A Tools
-from databricks_langchain import ChatDatabricks
-from langchain_core.tools import tool
-from langchain_core.messages import SystemMessage
-from langgraph.prebuilt import create_react_agent
-from a2a.client import A2ACardResolver, ClientFactory, ClientConfig
-from a2a.types import Message, Part, TextPart
-from uuid import uuid4
-import httpx
-import asyncio
-
-print("🏗️ Building A2A Orchestrator Agent...\n")
-
-# Note: AUTH_HEADERS is used for local notebook tests
-# When deployed with OBO, the agent uses the caller's credentials instead
-
-# Initialize the foundation model
-llm = ChatDatabricks(
-    endpoint=FOUNDATION_MODEL,
-    temperature=0.1,
-    max_tokens=1000
-)
-
-# System prompt
-SYSTEM_PROMPT = """You are an A2A Orchestrator Agent that can discover and communicate with other A2A-compliant agents.
-
-You have access to tools that let you:
-1. Discover available agents via the A2A Gateway (use discover_agents)
-2. Get details about any A2A agent's capabilities (use get_agent_capabilities)
-3. Call any A2A agent to perform tasks (use call_agent_via_gateway or call_a2a_agent)
-
-When a user asks you to do something:
-1. First, use discover_agents to find what agents are available
-2. If needed, use get_agent_capabilities to understand an agent's skills
-3. Call the appropriate agent with the right message
-4. Return the result to the user
-
-Always discover agents first rather than assuming what's available. Be helpful and concise.
-"""
-
-# Define A2A tools
-@tool
-def discover_agents() -> str:
-    """Discover available A2A agents via the gateway.
-
-    Returns a list of available agents with their names and descriptions.
-    Use this when you need to know what agents are available.
-    """
-    headers = AUTH_HEADERS
-
-    try:
-        with httpx.Client(timeout=30.0, headers=headers) as client:
-            response = client.get(f"{GATEWAY_URL}/api/agents")
-            response.raise_for_status()
-            data = response.json()
-
-            agents_list = data.get("agents", [])
-            if not agents_list:
-                return "No agents found"
-
-            result = f"Found {len(agents_list)} agents:\n"
-            for agent in agents_list:
-                result += f"- {agent['name']}: {agent.get('description', 'No description')}\n"
-                result += f"  URL: {agent.get('agent_card_url', 'N/A')}\n"
-
-            return result
-    except Exception as e:
-        return f"Error discovering agents: {str(e)}"
-
-
-@tool
-def get_agent_capabilities(agent_url: str) -> str:
-    """Get the capabilities of an A2A agent by fetching its agent card.
-
-    Args:
-        agent_url: The base URL of the A2A agent
-
-    Returns:
-        A description of the agent's capabilities and skills.
-    """
-    headers = AUTH_HEADERS
-    http_kwargs = {"headers": headers} if headers else {}
-
-    async def _get_card():
-        async with httpx.AsyncClient(timeout=30.0, headers=headers) as client:
-            resolver = A2ACardResolver(httpx_client=client, base_url=agent_url)
-            return await resolver.get_agent_card(http_kwargs=http_kwargs)
-
-    try:
-        card = asyncio.run(_get_card())
-
-        result = f"Agent: {card.name}\n"
-        result += f"Description: {card.description}\n"
-
-        if card.skills:
-            result += "Skills:\n"
-            for skill in card.skills:
-                result += f"  - {skill.name}: {skill.description}\n"
-
-        return result
-    except Exception as e:
-        return f"Error: {str(e)}"
-
-
-@tool
-def call_a2a_agent(agent_url: str, message: str) -> str:
-    """Call an A2A-compliant agent using the official A2A SDK.
-
-    Args:
-        agent_url: The base URL of the A2A agent
-        message: The message to send to the agent
-
-    Returns:
-        The agent's response as a string
-    """
-    headers = AUTH_HEADERS
-
-    async def _call():
-        async with httpx.AsyncClient(timeout=60.0, headers=headers) as httpx_client:
-            # Resolve card and fix URL
-            resolver = A2ACardResolver(httpx_client=httpx_client, base_url=agent_url)
-            card = await resolver.get_agent_card(http_kwargs={"headers": headers})
-            if card.url and not card.url.startswith("http"):
-                card.url = agent_url.rstrip("/") + "/" + card.url.lstrip("/")
-
-            # Create client using ClientFactory
-            config = ClientConfig(httpx_client=httpx_client)
-            factory = ClientFactory(config=config)
-            client = factory.create(card=card)
-
-            # Create Message object
-            msg = Message(
-                messageId=str(uuid4()),
-                role="user",
-                parts=[Part(root=TextPart(text=message))]
-            )
-
-            # Iterate through async iterator - collect final task
-            final_task = None
-            async for event in client.send_message(msg):
-                if isinstance(event, tuple):
-                    task, update = event
-                    final_task = task
-
-            # Extract text from task
-            if final_task and final_task.artifacts:
-                for artifact in final_task.artifacts:
-                    for part in artifact.parts:
-                        if hasattr(part, 'root') and hasattr(part.root, 'text'):
-                            return part.root.text
-
-            return "No response"
-
-    try:
-        return asyncio.run(_call())
-    except Exception as e:
-        return f"Error: {str(e)}"
-
-
-@tool
-def call_agent_via_gateway(agent_name: str, message: str) -> str:
-    """Call an agent through the A2A Gateway by name.
-
-    The gateway enforces UC connection access control.
-
-    Args:
-        agent_name: The short name of the agent (e.g., 'marcin-echo')
-        message: The message to send
-
-    Returns:
-        The agent's response
-    """
-    # Merge auth headers with content-type
-    headers = dict(AUTH_HEADERS) if AUTH_HEADERS else {}
-    headers["Content-Type"] = "application/json"
-
-    a2a_message = {
-        "jsonrpc": "2.0",
-        "id": str(uuid4()),
-        "method": "message/send",
-        "params": {
-            "message": {
-                "messageId": str(uuid4()),
-                "role": "user",
-                "parts": [{"kind": "text", "text": message}]
-            }
-        }
-    }
-
-    try:
-        with httpx.Client(timeout=60.0) as client:
-            response = client.post(
-                f"{GATEWAY_URL}/api/agents/{agent_name}/message",
-                json=a2a_message,
-                headers=headers
-            )
-            response.raise_for_status()
-            data = response.json()
-
-            # Extract result
-            result = data.get("result", {})
-            for artifact in result.get("artifacts", []):
-                for part in artifact.get("parts", []):
-                    if part.get("kind") == "text":
-                        return part.get("text", "")
-
-            return json.dumps(data)
-    except Exception as e:
-        return f"Error: {str(e)}"
-
-# Create the agent
-tools = [discover_agents, get_agent_capabilities, call_a2a_agent, call_agent_via_gateway]
-agent = create_react_agent(llm, tools)
-
-print(f"✅ A2A Orchestrator Agent created")
-print(f"   Foundation Model: {FOUNDATION_MODEL}")
-print(f"   Tools: {[t.name for t in tools]}")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 3. Test the Agent Locally
-# MAGIC
-# MAGIC **Note:** These tests run the agent locally using your OAuth token.
-# MAGIC When deployed with OBO, the agent will use the caller's credentials instead.
-
-# COMMAND ----------
-
-# DBTITLE 1,Test: Discover Agents
-print("🧪 Test 1: Discover available agents\n")
-
-response = agent.invoke({
-    "messages": [
-        SystemMessage(content=SYSTEM_PROMPT),
-        {"role": "user", "content": "What agents are available?"}
-    ]
-})
-
-print(response["messages"][-1].content)
-
-# COMMAND ----------
-
-# DBTITLE 1,Test: Call Calculator via Gateway
-print("🧪 Test 2: Call calculator agent\n")
-
-response = agent.invoke({
-    "messages": [
-        SystemMessage(content=SYSTEM_PROMPT),
-        {"role": "user", "content": f"Use the calculator agent ({PREFIX}-calculator) to add 42 and 58"}
-    ]
-})
-
-print(response["messages"][-1].content)
-
-# COMMAND ----------
-
-# DBTITLE 1,Test: Multi-Agent Workflow
-print("🧪 Test 3: Multi-agent workflow\n")
-
-response = agent.invoke({
-    "messages": [
-        SystemMessage(content=SYSTEM_PROMPT),
-        {"role": "user", "content": f"First test connectivity by echoing 'Hello' using {PREFIX}-echo, then calculate 100 times 25 using {PREFIX}-calculator"}
-    ]
-})
-
-print(response["messages"][-1].content)
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 4. Log Agent to MLflow
+# MAGIC ## 2. Log Agent to MLflow
 # MAGIC
 # MAGIC Using the MLflow 3.x "models from code" pattern with **OBO (On-Behalf-Of) authentication**.
 # MAGIC
@@ -466,19 +160,14 @@ print(response["messages"][-1].content)
 
 # COMMAND ----------
 
-# DBTITLE 1,Log Agent to MLflow
+# DBTITLE 1,Log Agent to MLflow (ResponsesAgent Pattern)
 from mlflow.models.auth_policy import AuthPolicy, SystemAuthPolicy, UserAuthPolicy
 from mlflow.models.resources import DatabricksServingEndpoint
+from pkg_resources import get_distribution
+import os
+import tempfile
 
-print("📦 Logging agent to MLflow...\n")
-
-# Model configuration
-model_config = {
-    "foundation_model_endpoint": FOUNDATION_MODEL,
-    "temperature": 0.1,
-    "max_tokens": 1000,
-    "gateway_url": GATEWAY_URL,  # A2A Gateway URL for agent discovery and calling
-}
+print("📦 Logging agent to MLflow using ResponsesAgent pattern...\n")
 
 # System Auth Policy - for resources accessed by the service principal
 # This allows the agent to call the foundation model endpoint
@@ -505,65 +194,40 @@ print("🔐 Auth Policy configured:")
 print(f"   System resources: [{FOUNDATION_MODEL}]")
 print(f"   User scopes (OBO): {user_auth_policy.api_scopes}")
 
-# Debug: verify auth_policy object
-print(f"\n🔍 Debug - auth_policy object:")
-print(f"   Type: {type(auth_policy)}")
-print(f"   Has system_auth_policy: {auth_policy.system_auth_policy is not None}")
-print(f"   Has user_auth_policy: {auth_policy.user_auth_policy is not None}")
-if auth_policy.system_auth_policy:
-    print(f"   System resources: {len(auth_policy.system_auth_policy.resources)} endpoint(s)")
-if auth_policy.user_auth_policy:
-    print(f"   User scopes: {auth_policy.user_auth_policy.api_scopes}")
+# Find the orchestrator agent file from the bundle
+# The agent is defined in src/agents/orchestrator/a2a_orchestrator_model.py
+possible_agent_paths = [
+    Path("/Workspace/Users") / spark.sql("SELECT current_user()").first()[0] / ".bundle/a2a-gateway/dev/files/src/agents/orchestrator/a2a_orchestrator_model.py",
+    Path("../src/agents/orchestrator/a2a_orchestrator_model.py"),
+    Path("src/agents/orchestrator/a2a_orchestrator_model.py"),
+]
 
-# Input example
-input_example = {
-    "messages": [
-        {"role": "user", "content": "What agents are available?"}
-    ]
-}
+agent_file_path = None
+for path in possible_agent_paths:
+    try:
+        if path.exists():
+            agent_file_path = str(path)
+            print(f"Found agent file: {agent_file_path}")
+            break
+    except Exception:
+        continue
 
-# Generate test output for signature inference
-print("🔍 Generating test output for signature inference...")
-test_response = agent.invoke({
-    "messages": [
-        SystemMessage(content=SYSTEM_PROMPT),
-        {"role": "user", "content": "What agents are available?"}
-    ]
-})
+if not agent_file_path:
+    raise FileNotFoundError(
+        "Could not find a2a_orchestrator_model.py. Searched paths:\n" +
+        "\n".join(f"  - {p}" for p in possible_agent_paths)
+    )
 
-test_output = {
-    "choices": [
-        {
-            "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": test_response["messages"][-1].content
-            },
-            "finish_reason": "stop"
-        }
-    ]
-}
+print(f"✅ Using agent file: {agent_file_path}")
 
-# Infer signature
-signature = mlflow.models.infer_signature(
-    model_input=input_example,
-    model_output=test_output
-)
-
-print(f"✅ Signature inferred")
-
-# Log the model with OBO auth policy using MLflow 3.x pattern
+# Log the model with OBO auth policy using MLflow 3.x ResponsesAgent pattern
 with mlflow.start_run() as run:
     run_id = run.info.run_id
 
-    # Log model with auth_policy for OBO (MLflow 3.x pattern)
     model_info = mlflow.pyfunc.log_model(
-        name="agent",  # MLflow 3.x uses 'name' instead of 'artifact_path'
-        python_model="../src/agents/orchestrator/a2a_orchestrator_model.py",
-        model_config=model_config,
-        input_example=input_example,
-        signature=signature,
-        auth_policy=auth_policy,  # Enable OBO authentication
+        name="agent",
+        python_model=agent_file_path,  # Use the orchestrator agent file from src/
+        auth_policy=auth_policy,
         pip_requirements=[
             "mlflow>=3.8.0",
             "langchain>=1.0.0",
@@ -571,30 +235,32 @@ with mlflow.start_run() as run:
             "langgraph>=1.0.0",
             "databricks-langchain>=0.13.0",
             "databricks-sdk>=0.78.0",
-            "databricks-ai-bridge>=0.10.0",  # For ModelServingUserCredentials
+            "databricks-ai-bridge>=0.10.0",
             "a2a-sdk>=0.3.20",
             "httpx>=0.28.0",
+            f"databricks-connect=={get_distribution('databricks-connect').version}"
         ]
     )
 
     model_uri = model_info.model_uri
 
-    # Log additional metadata in the same run
     mlflow.log_param("foundation_model", FOUNDATION_MODEL)
-    mlflow.log_param("num_tools", len(tools))
-    mlflow.log_param("pattern", "models-from-code")
+    mlflow.log_param("gateway_url", GATEWAY_URL)
+    mlflow.log_param("num_tools", 2)  # discover_agents, call_agent
+    mlflow.log_param("pattern", "responses-agent")
     mlflow.log_param("auth_method", "obo")
 
     mlflow.set_tag("agent_type", "a2a_orchestrator")
     mlflow.set_tag("interoperable", "true")
     mlflow.set_tag("a2a_compliant", "true")
     mlflow.set_tag("uses_obo", "true")
+    mlflow.set_tag("uses_responses_agent", "true")
     mlflow.set_tag("created_by", username)
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 5. Register to Unity Catalog
+# MAGIC ## 3. Register to Unity Catalog
 
 # COMMAND ----------
 
@@ -621,13 +287,23 @@ print(f"   Version: {model_version}")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 6. Deploy with `agents.deploy()`
+# MAGIC ## 4. Deploy with `agents.deploy()`
 # MAGIC
 # MAGIC This creates a Model Serving endpoint with:
 # MAGIC - Autoscaling infrastructure
 # MAGIC - Review App for testing
 # MAGIC - Inference tables for logging
 # MAGIC - Real-time tracing (MLflow 3.0+)
+# MAGIC
+# MAGIC ### OBO Permissions Required
+# MAGIC
+# MAGIC For the agent to call the A2A Gateway, the **calling user** must have:
+# MAGIC 1. `CAN_QUERY` permission on the A2A Gateway Databricks App
+# MAGIC 2. `USE_CONNECTION` on any UC connections the gateway uses
+# MAGIC
+# MAGIC If you see **401 Unauthorized** errors when calling agents:
+# MAGIC - Grant the user `CAN_QUERY` on the gateway app: `databricks apps update-permissions <app-name> --level CAN_QUERY --user-name <user>`
+# MAGIC - Grant `USE_CONNECTION` on relevant UC connections
 
 # COMMAND ----------
 
@@ -639,10 +315,29 @@ print(f"   Model: {UC_MODEL_NAME}")
 print(f"   Version: {model_version}")
 print(f"   ⏰ This may take 10-15 minutes...\n")
 
+# Use a new endpoint name to avoid signature conflicts with previous deployments
+# The error "all served models are required to be agents with the same signature"
+# means the old endpoint has incompatible models - deploy to a new endpoint
+ENDPOINT_NAME = f"{PREFIX}-a2a_orchestrator_v2"
+
+# Environment variables passed to the deployed agent
+# These override the defaults in CONFIG and can be changed without relogging
+ENVIRONMENT_VARS = {
+    "GATEWAY_URL": GATEWAY_URL,
+    "FOUNDATION_MODEL_ENDPOINT": FOUNDATION_MODEL,
+    "TEMPERATURE": "0.1",
+    "MAX_TOKENS": "1000"
+}
+
+print(f"🔧 Environment Variables:")
+for key, value in ENVIRONMENT_VARS.items():
+    print(f"   {key}: {value}")
+
 deployment = agents.deploy(
-    endpoint_name=f"{PREFIX}-a2a_agent_orchestrator",
+    endpoint_name=ENDPOINT_NAME,
     model_name=UC_MODEL_NAME,
     model_version=model_version,
+    environment_vars=ENVIRONMENT_VARS,  # Pass config as env vars
     scale_to_zero_enabled=True  # Cost optimization
 )
 
@@ -669,13 +364,22 @@ print(f"   3. Register as A2A agent via UC connection for full interoperability"
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 7. Test the Deployed Endpoint
+# MAGIC ## 5. Test the Deployed Endpoint (OBO Works Here!)
+# MAGIC
+# MAGIC **This is where OBO actually works.** When you query the deployed endpoint:
+# MAGIC - `ModelServingUserCredentials()` extracts YOUR identity from the request
+# MAGIC - The agent calls the A2A Gateway using YOUR credentials
+# MAGIC - The gateway checks YOUR permissions on UC connections
+# MAGIC
+# MAGIC If you still get 401 errors here, check:
+# MAGIC 1. You have `CAN_QUERY` permission on the A2A Gateway app
+# MAGIC 2. The endpoint logs show `OAUTH TOKEN SIZE: 500+` (not 43)
 
 # COMMAND ----------
 
-# DBTITLE 1,Query the Deployed Agent
+# DBTITLE 1,Query the Deployed Agent (OBO-enabled)
 import time
-from databricks.sdk.service.serving import EndpointStateReady, ChatMessage, ChatMessageRole
+from databricks.sdk.service.serving import EndpointStateReady
 
 def wait_for_endpoint_ready(client, endpoint_name, expected_model_name, expected_version, timeout_minutes=15, poll_interval_seconds=30):
     """Wait for serving endpoint to be ready AND serving the expected model version."""
@@ -728,27 +432,40 @@ wait_for_endpoint_ready(w, endpoint_name, UC_MODEL_NAME, model_version)
 
 print("\n🧪 Testing deployed endpoint...\n")
 
-# Query using the deployment endpoint with ChatMessage objects
+# Query using ResponsesAgent format - uses 'input' not 'messages'
+# ResponsesAgent expects: input=[{role, content}, ...]
 response = w.serving_endpoints.query(
     name=endpoint_name,
-    messages=[
-        ChatMessage(role=ChatMessageRole.USER, content="What agents can you discover?")
-    ]
+    input=[{"role": "user", "content": "What agents can you discover?"}]
 )
 
 print("✅ Response from deployed agent:")
 print("-" * 40)
-if hasattr(response, 'choices') and response.choices:
-    print(response.choices[0].message.content)
-elif isinstance(response, dict) and 'choices' in response:
-    print(response['choices'][0]['message']['content'])
+# ResponsesAgent returns 'output' not 'choices'
+if hasattr(response, 'output') and response.output:
+    # Output is a list of items, each with 'content' containing 'text'
+    for item in response.output:
+        if hasattr(item, 'content') and item.content:
+            for content in item.content:
+                if hasattr(content, 'text'):
+                    print(content.text)
+                    break
+            break
+elif isinstance(response, dict) and 'output' in response:
+    for item in response['output']:
+        if 'content' in item:
+            for content in item['content']:
+                if 'text' in content:
+                    print(content['text'])
+                    break
+            break
 else:
     print(response)
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 8. Register as A2A Agent (Optional)
+# MAGIC ## 6. Register as A2A Agent (Optional)
 # MAGIC
 # MAGIC To make this deployed agent **discoverable via the A2A Gateway**, create a UC connection:
 # MAGIC

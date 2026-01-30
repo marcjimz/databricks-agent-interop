@@ -1,9 +1,11 @@
 """Health and info endpoints for the A2A Gateway."""
 
-from fastapi import APIRouter
+import os
+from fastapi import APIRouter, Request
 
 from config import settings
 from models import HealthResponse
+from services import extract_token_from_request
 
 router = APIRouter(tags=["Gateway"])
 
@@ -24,6 +26,65 @@ async def root():
 async def health_check():
     """Health check endpoint."""
     return HealthResponse(status="healthy", version=settings.app_version)
+
+
+@router.get("/debug/obo")
+async def debug_obo(request: Request):
+    """Debug endpoint to check OBO authentication."""
+    from databricks.sdk import WorkspaceClient
+
+    auth_token = extract_token_from_request(request)
+    result = {
+        "token_present": auth_token is not None,
+        "token_length": len(auth_token) if auth_token else 0,
+        "DATABRICKS_HOST": os.environ.get("DATABRICKS_HOST", "NOT SET"),
+    }
+
+    # First check default SDK config
+    try:
+        default_client = WorkspaceClient()
+        result["default_sdk_host"] = default_client.config.host
+    except Exception as e:
+        result["default_sdk_error"] = str(e)
+
+    if auth_token:
+        try:
+            # Try OBO client
+            host = os.environ.get("DATABRICKS_HOST", "")
+            if not host:
+                try:
+                    default_client = WorkspaceClient()
+                    host = default_client.config.host
+                except:
+                    pass
+
+            result["obo_host_used"] = host
+
+            if host:
+                client = WorkspaceClient(token=auth_token, host=host)
+            else:
+                client = WorkspaceClient(token=auth_token)
+
+            me = client.current_user.me()
+            result["obo_user"] = me.user_name
+            result["obo_success"] = True
+
+            # Try listing connections
+            try:
+                connections = list(client.connections.list())
+                a2a_conns = [c.name for c in connections if c.name and c.name.endswith("-a2a")]
+                result["a2a_connections"] = a2a_conns
+                result["total_connections"] = len(connections)
+                result["connections_success"] = True
+            except Exception as e:
+                result["connections_error"] = str(e)
+                result["connections_success"] = False
+
+        except Exception as e:
+            result["obo_error"] = str(e)
+            result["obo_success"] = False
+
+    return result
 
 
 def _get_agent_card():

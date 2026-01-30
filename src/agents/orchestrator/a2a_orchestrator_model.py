@@ -1,26 +1,20 @@
-"""
-A2A Orchestrator Agent - MLflow PyFunc Model
-
-This agent can discover and call other A2A-compliant agents via the A2A Gateway.
-It uses OBO (On-Behalf-Of) authentication to act on behalf of the calling user,
-enabling fine-grained access control via Unity Catalog.
-
-CRITICAL: OBO must be initialized in predict(), not load_context(), because
-the user identity is only known at runtime when a request is made.
-
-It is designed to be deployed to Mosaic AI Framework using agents.deploy().
-"""
-
-import mlflow
 import json
 import logging
-from typing import Any
+from uuid import uuid4
+
+import mlflow
+from mlflow.pyfunc import ResponsesAgent
+from mlflow.types.responses import (
+    ResponsesAgentRequest,
+    ResponsesAgentResponse,
+    create_text_output_item
+)
 
 # Enable MLflow autologging for full observability
 mlflow.langchain.autolog()
 
 # Configure logging for debugging
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # System prompt for the A2A orchestrator
@@ -44,43 +38,55 @@ Example workflow:
 - You: Return the result to the user
 """
 
+import os
 
-class A2AOrchestratorAgent(mlflow.pyfunc.PythonModel):
+def _load_config():
+    """Load configuration from environment variables at runtime.
+
+    Called when agent is instantiated (at deployment time), not at import time.
     """
-    MLflow PyFunc model that orchestrates A2A agents via the A2A Gateway.
+    return {
+        "foundation_model_endpoint": os.environ.get("FOUNDATION_MODEL_ENDPOINT", "databricks-meta-llama-3-1-8b-instruct"),
+        "temperature": float(os.environ.get("TEMPERATURE", "0.1")),
+        "max_tokens": int(os.environ.get("MAX_TOKENS", "1000")),
+        "gateway_url": os.environ.get("GATEWAY_URL", "")  # REQUIRED - no default
+    }
 
-    Uses OBO (On-Behalf-Of) authentication to:
-    - Act on behalf of the calling user
-    - Enable fine-grained access control via Unity Catalog
-    - Pass user identity through to the A2A Gateway
 
-    CRITICAL: OBO is initialized in predict(), not load_context(), because
-    the user identity is only available at request time.
-
-    This model can be deployed to Databricks Mosaic AI Framework using agents.deploy()
-    and will be discoverable/callable via the Model Serving endpoint.
+class A2AOBOCallingAgent(ResponsesAgent):
+    """
+    Class representing a tool-calling Agent.
+    Handles both tool execution via exec_fn and LLM interactions via model serving.
     """
 
-    def load_context(self, context):
-        """Initialize static configuration when the model is loaded.
+    def __init__(self):
+        """Initialize agent. Config will be loaded from environment variables at predict time."""
+        logger.debug("=== __init__ called ===")
+        # Config is loaded lazily in predict() when env vars are available
+        self._config_loaded = False
+        self.endpoint = None
+        self.temperature = None
+        self.max_tokens = None
+        self.gateway_url = None
 
-        NOTE: Do NOT initialize OBO here - user identity is not known yet.
-        OBO must be initialized in predict() at request time.
+    def _ensure_config(self):
+        """Load config from environment variables on first predict call.
+
+        Environment variables are set at deployment time via:
+        agents.deploy(environment_vars={'GATEWAY_URL': '...', ...})
         """
-        logger.debug("=== load_context called ===")
+        if self._config_loaded:
+            return
 
-        # Get configuration
-        model_config = context.model_config if hasattr(context, 'model_config') else {}
-        self.endpoint = model_config.get("foundation_model_endpoint", "databricks-meta-llama-3-1-8b-instruct")
-        self.temperature = model_config.get("temperature", 0.1)
-        self.max_tokens = model_config.get("max_tokens", 1000)
+        config = _load_config()
+        self.endpoint = config.get("foundation_model_endpoint", "databricks-meta-llama-3-1-8b-instruct")
+        self.temperature = config.get("temperature", 0.1)
+        self.max_tokens = config.get("max_tokens", 1000)
+        self.gateway_url = config.get("gateway_url", "")
 
-        # Gateway URL from config
-        self.gateway_url = model_config.get("gateway_url", "")
-
-        logger.debug(f"Endpoint: {self.endpoint}")
-        logger.debug(f"Gateway URL: {self.gateway_url}")
-        logger.debug("Static config loaded - OBO will be initialized in predict()")
+        # Log config (don't validate here - let tools fail with clear errors if gateway_url missing)
+        logger.info(f"Config loaded - Endpoint: {self.endpoint}, Gateway: {self.gateway_url or '(not set)'}")
+        self._config_loaded = True
 
     def _create_tools(self, auth_headers: dict, gateway_url: str):
         """Create A2A tools with the provided auth headers.
@@ -168,7 +174,7 @@ class A2AOrchestratorAgent(mlflow.pyfunc.PythonModel):
 
         return [discover_agents, call_agent]
 
-    def predict(self, context, model_input, params=None) -> dict:
+    def predict(self, request: ResponsesAgentRequest) -> ResponsesAgentResponse:
         """Handle prediction requests in Agent Framework format.
 
         CRITICAL: OBO authentication is initialized HERE because the user
@@ -179,7 +185,12 @@ class A2AOrchestratorAgent(mlflow.pyfunc.PythonModel):
         from langgraph.prebuilt import create_react_agent
         import pandas as pd
 
+        # Load config from environment variables on first call
+        self._ensure_config()
+
         logger.debug("=== predict called - initializing OBO ===")
+
+        print(request.input)
 
         # Initialize OBO authentication - user identity is now known
         # This is the CRITICAL part: ModelServingUserCredentials extracts
@@ -193,7 +204,10 @@ class A2AOrchestratorAgent(mlflow.pyfunc.PythonModel):
             # This uses the calling user's identity, not a service account
             w = WorkspaceClient(credentials_strategy=ModelServingUserCredentials())
             auth_headers = dict(w.config.authenticate())
-            logger.debug("OBO authentication initialized successfully")
+            logger.warn("OBO authentication initialized successfully")
+
+            #TODO REMOVE
+            logger.warn(f"OAUTH TOKEN SIZE: {(auth_headers['Authorization'])}...")
         except Exception as e:
             # Do NOT silently ignore auth failures - fail explicitly
             logger.error(f"Failed to initialize OBO credentials: {type(e).__name__}: {e}")
@@ -202,28 +216,24 @@ class A2AOrchestratorAgent(mlflow.pyfunc.PythonModel):
                 "Ensure the model is deployed with OBO enabled and the user has appropriate permissions."
             ) from e
 
-        # Get gateway URL - try from config first, then environment
-        import os
-        gateway_url = self.gateway_url or os.environ.get("GATEWAY_URL", "")
-        if not gateway_url:
-            logger.error("No gateway URL configured!")
-            raise ValueError(
-                "No gateway URL configured. Set gateway_url in model_config or GATEWAY_URL environment variable."
-            )
-
         # Initialize LLM
         llm = ChatDatabricks(
             endpoint=self.endpoint,
             temperature=self.temperature,
             max_tokens=self.max_tokens
         )
-
         # Create tools with OBO auth headers
-        tools = self._create_tools(auth_headers, gateway_url)
-        logger.debug(f"Created {len(tools)} tools with OBO credentials")
+        tools = self._create_tools(auth_headers, self.gateway_url)
 
         # Create the agent
         agent = create_react_agent(llm, tools)
+
+        model_input = {
+            "messages": [
+                SystemMessage(content=SYSTEM_PROMPT),
+                {"role": "user", "content": request.input[-1].content}
+            ]
+        }
 
         # Extract query from input
         if isinstance(model_input, pd.DataFrame):
@@ -261,21 +271,19 @@ class A2AOrchestratorAgent(mlflow.pyfunc.PythonModel):
 
         # Extract final message
         assistant_message = response["messages"][-1].content
+        
+        import uuid
+        msg_id = str(uuid.uuid4())
 
-        # Return in Agent Framework format
-        return {
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": assistant_message
-                    },
-                    "finish_reason": "stop"
-                }
-            ]
-        }
+        return ResponsesAgentResponse(
+                output=[
+                    create_text_output_item(
+                        text=assistant_message,
+                        id=msg_id
+                    )])
 
 
-# Set the model for MLflow "models from code" pattern
-mlflow.models.set_model(A2AOrchestratorAgent())
+# Register the agent with MLflow
+# Config validation is deferred to predict() when env vars are available
+AGENT = A2AOBOCallingAgent()
+mlflow.models.set_model(AGENT)

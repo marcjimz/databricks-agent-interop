@@ -214,7 +214,7 @@ Response:
 
 ### 4. Access Denied (No UC Connection Access)
 
-If you don't have `USE CONNECTION` privilege:
+If you don't have `USE_CONNECTION` privilege, you get a **403 Forbidden**:
 
 ```bash
 curl -s "${GATEWAY_URL}/api/agents/${PREFIX}-calculator/message" \
@@ -224,10 +224,10 @@ curl -s "${GATEWAY_URL}/api/agents/${PREFIX}-calculator/message" \
   -d '{"jsonrpc":"2.0","id":"1","method":"message/send","params":{"message":{"messageId":"msg-1","role":"user","parts":[{"kind":"text","text":"Hello"}]}}}' | jq
 ```
 
-Response:
+Response (HTTP 403):
 ```json
 {
-  "error": "Access denied to agent connection: <prefix>-calculator-a2a. Ensure you have USE_CONNECTION privilege."
+  "detail": "Access denied to agent 'marcin-calculator'. Ensure you have USE_CONNECTION privilege on connection 'marcin-calculator-a2a'."
 }
 ```
 

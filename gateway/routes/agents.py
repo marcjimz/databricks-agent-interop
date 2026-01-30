@@ -11,30 +11,63 @@ from fastapi import APIRouter, Request, HTTPException, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from models import AgentListResponse, AgentInfo, A2AJsonRpcRequest
-from services import get_discovery, get_proxy_service, extract_token_from_request
+from services import (
+    get_discovery,
+    get_proxy_service,
+    extract_token_from_request,
+    extract_user_email_from_request,
+    AccessDeniedException,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/agents", tags=["Agents"])
 
 
+def _get_agent_or_raise(discovery, agent_name: str) -> AgentInfo:
+    """Get agent by name, raising appropriate HTTP exceptions.
+
+    Args:
+        discovery: AgentDiscovery instance with user's OBO token.
+        agent_name: Name of the agent to look up.
+
+    Returns:
+        AgentInfo if found and user has access.
+
+    Raises:
+        HTTPException: 404 if agent not found, 403 if access denied.
+    """
+    try:
+        agent = discovery.get_agent_by_name(agent_name)
+        if not agent:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Agent '{agent_name}' not found"
+            )
+        return agent
+    except AccessDeniedException as e:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(e)
+        )
+
+
 @router.get("", response_model=AgentListResponse)
 async def list_agents(request: Request):
     """List all discoverable A2A agents.
 
-    Discovers agents by finding UC connections that end with '-a2a'.
-    Uses OBO to list only connections the calling user has access to.
+    Returns only agents where the calling user has USE_CONNECTION privilege
+    on the corresponding Unity Catalog connection.
     """
     auth_token = extract_token_from_request(request)
-    logger.info(f"list_agents: auth_token present={auth_token is not None}")
+    user_email = extract_user_email_from_request(request)
 
-    discovery = get_discovery(auth_token=auth_token)
+    logger.info(f"list_agents: auth_token present={auth_token is not None}, user_email={user_email}")
+
+    discovery = get_discovery(auth_token=auth_token, user_email=user_email)
     agents = discovery.discover_agents()
 
-    return AgentListResponse(
-        agents=agents,
-        total=len(agents)
-    )
+    return AgentListResponse(agents=agents, total=len(agents))
 
 
 @router.get("/{agent_name}", response_model=AgentInfo)
@@ -43,18 +76,18 @@ async def get_agent(agent_name: str, request: Request):
 
     Args:
         agent_name: Name of the agent (without -a2a suffix).
+
+    Returns:
+        AgentInfo for the requested agent.
+
+    Raises:
+        404: Agent not found.
+        403: User lacks USE_CONNECTION privilege.
     """
     auth_token = extract_token_from_request(request)
-    discovery = get_discovery(auth_token=auth_token)
-
-    agent = discovery.get_agent_by_name(agent_name)
-    if not agent:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Agent '{agent_name}' not found"
-        )
-
-    return agent
+    user_email = extract_user_email_from_request(request)
+    discovery = get_discovery(auth_token=auth_token, user_email=user_email)
+    return _get_agent_or_raise(discovery, agent_name)
 
 
 @router.get("/{agent_name}/.well-known/agent.json")
@@ -62,18 +95,17 @@ async def get_agent_card(agent_name: str, request: Request):
     """Get the A2A agent card for a specific agent.
 
     Fetches from the agent_card_url stored in the UC connection.
+
+    Raises:
+        404: Agent not found.
+        403: User lacks USE_CONNECTION privilege.
     """
     auth_token = extract_token_from_request(request)
-    discovery = get_discovery(auth_token=auth_token)
+    user_email = extract_user_email_from_request(request)
+    discovery = get_discovery(auth_token=auth_token, user_email=user_email)
     proxy_service = get_proxy_service()
 
-    agent = discovery.get_agent_by_name(agent_name)
-    if not agent:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Agent '{agent_name}' not found"
-        )
-
+    agent = _get_agent_or_raise(discovery, agent_name)
     return await proxy_service.fetch_agent_card(agent, request)
 
 
@@ -98,17 +130,17 @@ async def send_message(agent_name: str, request: Request, body: A2AJsonRpcReques
       }
     }
     ```
+
+    Raises:
+        404: Agent not found.
+        403: User lacks USE_CONNECTION privilege.
     """
     auth_token = extract_token_from_request(request)
-    discovery = get_discovery(auth_token=auth_token)
+    user_email = extract_user_email_from_request(request)
+    discovery = get_discovery(auth_token=auth_token, user_email=user_email)
     proxy_service = get_proxy_service()
 
-    agent = discovery.get_agent_by_name(agent_name)
-    if not agent:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Agent '{agent_name}' not found"
-        )
+    agent = _get_agent_or_raise(discovery, agent_name)
 
     # Get request body - use the Pydantic model if provided, otherwise read raw body
     if body:
@@ -153,17 +185,17 @@ async def stream_message(agent_name: str, request: Request, body: A2AJsonRpcRequ
       }
     }
     ```
+
+    Raises:
+        404: Agent not found.
+        403: User lacks USE_CONNECTION privilege.
     """
     auth_token = extract_token_from_request(request)
-    discovery = get_discovery(auth_token=auth_token)
+    user_email = extract_user_email_from_request(request)
+    discovery = get_discovery(auth_token=auth_token, user_email=user_email)
     proxy_service = get_proxy_service()
 
-    agent = discovery.get_agent_by_name(agent_name)
-    if not agent:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Agent '{agent_name}' not found"
-        )
+    agent = _get_agent_or_raise(discovery, agent_name)
 
     # Get request body - use the Pydantic model if provided, otherwise read raw body
     if body:
