@@ -36,7 +36,7 @@
 # COMMAND ----------
 
 # DBTITLE 1,Install Dependencies
-# MAGIC %pip install mlflow>=3.8.0 databricks-agents>=1.9.0 langchain>=1.0.0 langchain-core>=1.0.0 langgraph>=1.0.0 databricks-langchain>=0.13.0 databricks-sdk>=0.78.0 databricks-ai-bridge>=0.10.0 a2a-sdk[http-server]>=0.3.20 httpx>=0.28.0 pyyaml --quiet
+# MAGIC %pip install backoff mlflow>=3.8.0 databricks-agents>=1.9.0 langchain>=1.0.0 langchain-core>=1.0.0 langgraph>=1.0.0 databricks-langchain>=0.13.0 databricks-sdk>=0.78.0 databricks-ai-bridge>=0.10.0 a2a-sdk[http-server]>=0.3.20 httpx>=0.28.0 pyyaml --quiet
 
 # COMMAND ----------
 
@@ -178,6 +178,8 @@ system_auth_policy = SystemAuthPolicy(resources=resources)
 # This enables the agent to call APIs using the caller's identity
 user_auth_policy = UserAuthPolicy(
     api_scopes=[
+        "catalog.connections",  # For accessing UC connections via the gateway
+        "iam.current-user:read",  # For reading current user identity
         "apps.apps",  # For calling Databricks Apps (A2A Gateway) as the user
     ]
 )
@@ -229,6 +231,7 @@ with mlflow.start_run() as run:
         python_model=agent_file_path,  # Use the orchestrator agent file from src/
         auth_policy=auth_policy,
         pip_requirements=[
+            "backoff",
             "mlflow>=3.8.0",
             "langchain>=1.0.0",
             "langchain-core>=1.0.0",
@@ -503,7 +506,7 @@ else:
 # MAGIC |-----------|-------------|
 # MAGIC | **Agent** | LangGraph ReAct agent with A2A tools |
 # MAGIC | **Tools** | `discover_agents`, `call_agent_via_gateway`, `call_a2a_agent` |
-# MAGIC | **Auth** | OBO with `apps.apps` scope - uses caller's credentials |
+# MAGIC | **Auth** | OBO with `catalog.connections`, `iam.current-user:read`, `apps.apps` scopes |
 # MAGIC | **Registry** | Unity Catalog model: `{UC_MODEL_NAME}` |
 # MAGIC | **Endpoint** | Model Serving with autoscaling |
 # MAGIC

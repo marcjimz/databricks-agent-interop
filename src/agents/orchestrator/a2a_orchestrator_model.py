@@ -62,6 +62,8 @@ class A2AOBOCallingAgent(ResponsesAgent):
     def __init__(self):
         """Initialize agent. Config will be loaded from environment variables at predict time."""
         logger.debug("=== __init__ called ===")
+        # Enable OBO debug mode for troubleshooting authentication issues
+        os.environ["OBO_DEBUG_MODE"] = "true"
         # Config is loaded lazily in predict() when env vars are available
         self._config_loaded = False
         self.endpoint = None
