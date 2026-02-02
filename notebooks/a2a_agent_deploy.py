@@ -178,9 +178,12 @@ system_auth_policy = SystemAuthPolicy(resources=resources)
 # This enables the agent to call APIs using the caller's identity
 user_auth_policy = UserAuthPolicy(
     api_scopes=[
+        "apps.apps",  # For calling Databricks Apps (A2A Gateway)
         "catalog.connections",  # For accessing UC connections via the gateway
+        "iam.access-control:read",  # For reading access control policies
         "iam.current-user:read",  # For reading current user identity
-        "apps.apps",  # For calling Databricks Apps (A2A Gateway) as the user
+        "mcp.external",  # For MCP external tool access
+        "mcp.functions",  # For MCP function access
     ]
 )
 
@@ -468,6 +471,22 @@ else:
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ### Query via SQL (ai_query)
+# MAGIC
+# MAGIC You can also query the deployed agent directly from SQL using `ai_query`:
+
+# COMMAND ----------
+
+# DBTITLE 1,Query Agent via SQL
+# MAGIC %sql
+# MAGIC SELECT ai_query(
+# MAGIC   'marcin-a2a_orchestrator_v2',
+# MAGIC   'Hello! What agents do we have access to?'
+# MAGIC )
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## 6. Register as A2A Agent (Optional)
 # MAGIC
 # MAGIC To make this deployed agent **discoverable via the A2A Gateway**, create a UC connection:
@@ -506,7 +525,7 @@ else:
 # MAGIC |-----------|-------------|
 # MAGIC | **Agent** | LangGraph ReAct agent with A2A tools |
 # MAGIC | **Tools** | `discover_agents`, `call_agent_via_gateway`, `call_a2a_agent` |
-# MAGIC | **Auth** | OBO with `catalog.connections`, `iam.current-user:read`, `apps.apps` scopes |
+# MAGIC | **Auth** | OBO with apps, catalog, iam, and mcp scopes |
 # MAGIC | **Registry** | Unity Catalog model: `{UC_MODEL_NAME}` |
 # MAGIC | **Endpoint** | Model Serving with autoscaling |
 # MAGIC

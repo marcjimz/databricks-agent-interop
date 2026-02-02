@@ -1,6 +1,6 @@
 import json
 import logging
-from uuid import uuid4
+import uuid
 
 import mlflow
 from mlflow.pyfunc import ResponsesAgent
@@ -96,7 +96,6 @@ class A2AOBOCallingAgent(ResponsesAgent):
         These tools use the OBO credentials from the calling user.
         """
         from langchain_core.tools import tool
-        from uuid import uuid4
         import httpx
 
         @tool
@@ -142,11 +141,11 @@ class A2AOBOCallingAgent(ResponsesAgent):
 
             a2a_message = {
                 "jsonrpc": "2.0",
-                "id": str(uuid4()),
+                "id": str(uuid.uuid4()),
                 "method": "message/send",
                 "params": {
                     "message": {
-                        "messageId": str(uuid4()),
+                        "messageId": str(uuid.uuid4()),
                         "role": "user",
                         "parts": [{"kind": "text", "text": message}]
                     }
@@ -176,42 +175,60 @@ class A2AOBOCallingAgent(ResponsesAgent):
 
         return [discover_agents, call_agent]
 
-    def predict(self, request: ResponsesAgentRequest) -> ResponsesAgentResponse:
-        """Handle prediction requests in Agent Framework format.
+    def _extract_text_content(self, content) -> str:
+        """Extract text from message content.
 
-        CRITICAL: OBO authentication is initialized HERE because the user
-        identity is only known at request time, not at model load time.
+        Handles both string content and ResponseInputTextParam list format.
+
+        Args:
+            content: Either a string or a list of content items
+
+        Returns:
+            Extracted text as a string
+        """
+        if isinstance(content, str):
+            return content
+
+        # Handle list of content items (ResponseInputTextParam objects)
+        if isinstance(content, list):
+            text_parts = []
+            for item in content:
+                # Handle dict format
+                if isinstance(item, dict):
+                    if item.get("type") == "output_text" or item.get("type") == "text":
+                        text_parts.append(item.get("text", ""))
+                # Handle object format (ResponseInputTextParam)
+                elif hasattr(item, "text"):
+                    text_parts.append(item.text)
+                elif hasattr(item, "content"):
+                    text_parts.append(str(item.content))
+            return "".join(text_parts)
+
+        # Fallback to string conversion
+        return str(content) if content else ""
+
+    def _init_obo_and_agent(self, request: ResponsesAgentRequest):
+        """Initialize OBO authentication, LLM, tools, and agent.
+
+        Returns tuple of (agent, messages) ready for invoke/stream.
         """
         from databricks_langchain import ChatDatabricks
-        from langchain_core.messages import SystemMessage
+        from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
         from langgraph.prebuilt import create_react_agent
-        import pandas as pd
+        from databricks.sdk import WorkspaceClient
+        from databricks_ai_bridge import ModelServingUserCredentials
 
         # Load config from environment variables on first call
         self._ensure_config()
 
-        logger.debug("=== predict called - initializing OBO ===")
-
-        print(request.input)
+        logger.debug("=== Initializing OBO ===")
 
         # Initialize OBO authentication - user identity is now known
-        # This is the CRITICAL part: ModelServingUserCredentials extracts
-        # the calling user's identity from the request context
-        # Ref: https://docs.databricks.com/aws/en/generative-ai/agent-framework/agent-authentication
-        from databricks.sdk import WorkspaceClient
-        from databricks_ai_bridge import ModelServingUserCredentials
-
         try:
-            # Create WorkspaceClient with OBO credentials
-            # This uses the calling user's identity, not a service account
             w = WorkspaceClient(credentials_strategy=ModelServingUserCredentials())
             auth_headers = dict(w.config.authenticate())
-            logger.warn("OBO authentication initialized successfully")
-
-            #TODO REMOVE
-            logger.warn(f"OAUTH TOKEN SIZE: {(auth_headers['Authorization'])}...")
+            logger.info("OBO authentication initialized successfully")
         except Exception as e:
-            # Do NOT silently ignore auth failures - fail explicitly
             logger.error(f"Failed to initialize OBO credentials: {type(e).__name__}: {e}")
             raise RuntimeError(
                 f"OBO authentication failed: {e}. "
@@ -224,65 +241,54 @@ class A2AOBOCallingAgent(ResponsesAgent):
             temperature=self.temperature,
             max_tokens=self.max_tokens
         )
+
         # Create tools with OBO auth headers
         tools = self._create_tools(auth_headers, self.gateway_url)
 
         # Create the agent
         agent = create_react_agent(llm, tools)
 
-        model_input = {
-            "messages": [
-                SystemMessage(content=SYSTEM_PROMPT),
-                {"role": "user", "content": request.input[-1].content}
-            ]
-        }
+        # Convert full conversation history to LangChain messages
+        # ResponsesAgent content can be string or list of ResponseInputTextParam
+        messages = [SystemMessage(content=SYSTEM_PROMPT)]
+        for msg in request.input:
+            text_content = self._extract_text_content(msg.content)
+            if not text_content.strip():
+                continue  # Skip empty messages
 
-        # Extract query from input
-        if isinstance(model_input, pd.DataFrame):
-            if "messages" in model_input.columns:
-                messages_data = model_input["messages"].iloc[0]
-                if isinstance(messages_data, list) and len(messages_data) > 0:
-                    query = messages_data[-1].get("content", "")
-                else:
-                    query = str(messages_data)
-            else:
-                query = str(model_input.iloc[0, 0])
-        elif isinstance(model_input, dict):
-            if "messages" in model_input:
-                messages_input = model_input["messages"]
-                query = messages_input[-1].get("content", "") if messages_input else ""
-            elif "input" in model_input:
-                query = model_input["input"]
-            else:
-                query = str(model_input)
-        elif hasattr(model_input, 'messages'):
-            if hasattr(model_input.messages, '__len__') and len(model_input.messages) > 0:
-                query = model_input.messages[-1].content
-            else:
-                query = ""
-        else:
-            query = str(model_input)
+            if msg.role == "user":
+                messages.append(HumanMessage(content=text_content))
+            elif msg.role == "assistant":
+                messages.append(AIMessage(content=text_content))
 
-        # Invoke agent
-        messages = [
-            SystemMessage(content=SYSTEM_PROMPT),
-            {"role": "user", "content": query}
-        ]
+        return agent, messages
 
+    def predict(self, request: ResponsesAgentRequest) -> ResponsesAgentResponse:
+        """Handle prediction requests in Agent Framework format.
+
+        Supports full conversation history for multi-turn interactions.
+        """
+        agent, messages = self._init_obo_and_agent(request)
+
+        # Invoke agent with full conversation history
         response = agent.invoke({"messages": messages})
 
         # Extract final message
         assistant_message = response["messages"][-1].content
-        
-        import uuid
         msg_id = str(uuid.uuid4())
 
         return ResponsesAgentResponse(
-                output=[
-                    create_text_output_item(
-                        text=assistant_message,
-                        id=msg_id
-                    )])
+            output=[
+                create_text_output_item(
+                    text=assistant_message,
+                    id=msg_id
+                )
+            ]
+        )
+
+    # TODO: Add predict_stream for streaming support once LangGraph streaming is debugged
+    # def predict_stream(self, request: ResponsesAgentRequest) -> Generator[ResponsesAgentStreamEvent, None, None]:
+    #     ...
 
 
 # Register the agent with MLflow

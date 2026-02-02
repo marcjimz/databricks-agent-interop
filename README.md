@@ -1,48 +1,49 @@
-# Databricks A2A Gateway
+# Databricks A2A Gateway Framework
 
-An [A2A protocol](https://google.github.io/A2A/) gateway powered by an **Agent Registry** built on Databricks Unity Catalog. The gateway leverages native UC objects (HTTP connections) for agent discovery and access control, enabling seamless interoperability between A2A-compliant agents.
+A framework for [A2A protocol](https://google.github.io/A2A/) interoperability on Databricks, powered by Unity Catalog for agent discovery and access control.
 
-For more on AI Agent Protocols, reference the helpful paper: [A Survey of AI Agent Protocols](https://arxiv.org/pdf/2504.16736)
+For more on AI Agent Protocols, see: [A Survey of AI Agent Protocols](https://arxiv.org/pdf/2504.16736)
 
 ![AgentProtocols](./static/img/agent_protocols.png)
 
+## What's Included
+
+| Component | Description |
+|-----------|-------------|
+| **Gateway** | FastAPI app for agent discovery, authorization, and proxying |
+| **Demo Agents** | Echo and Calculator agents for testing |
+| **Orchestrator** | Deployable agent that discovers and calls other A2A agents |
+| **Notebooks** | Interactive demos and deployment scripts |
+
 ## Architecture
 
-**Gateway** (`gateway/`) - FastAPI application that:
-- Discovers agents via UC connections ending with `-a2a`
-- Authorizes using OBO (On-Behalf-Of) to check user's connection access
-- Proxies requests to downstream agents with SSE streaming support
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│   User/Agent    │────▶│   A2A Gateway   │────▶│  A2A Agents     │
+│                 │     │  (Databricks    │     │  (Echo, Calc,   │
+│                 │     │   App)          │     │   External)     │
+└─────────────────┘     └────────┬────────┘     └─────────────────┘
+                                 │
+                        ┌────────▼────────┐
+                        │  Unity Catalog  │
+                        │  (Connections)  │
+                        └─────────────────┘
+```
 
-**Endpoints:**
+**Gateway Endpoints:**
 | Endpoint | Purpose |
 |----------|---------|
-| `GET /` | Gateway info |
-| `GET /docs` | Swagger UI |
 | `GET /api/agents` | List accessible agents |
 | `GET /api/agents/{name}` | Get agent info |
-| `POST /api/agents/{name}/message` | Send JSON-RPC message |
-| `GET /.well-known/agent.json` | Gateway's A2A agent card |
+| `POST /api/agents/{name}/message` | Send A2A message |
+| `GET /docs` | Swagger UI |
 
-**Demo Agents** (`src/agents/`)
-- Echo Agent - Simple echo back for testing
-- Calculator Agent - Arithmetic with LangChain tools
-- Assistant Agent - Orchestrator that discovers and uses other agents (optional)
+## Quick Start
 
-**Demo Notebooks** (`notebooks/`)
-- `a2a_demo.py` - Interactive notebook demonstrating all A2A protocol features
-- `a2a_agent_deploy.py` - Deploy an A2A orchestrator agent to Mosaic AI Framework
-
-## Prerequisites
-
-- **Azure Databricks** with Microsoft Entra ID authentication
-- [Databricks CLI](https://docs.databricks.com/dev-tools/cli/install.html) configured with your default profile
-- `make`
-
-## Deploy
+**Prerequisites:** Databricks CLI configured, `make`
 
 ```bash
-PREFIX=marcin
-make auth
+PREFIX=yourname
 make deploy PREFIX=$PREFIX
 make status
 ```
@@ -416,8 +417,8 @@ python -m tests.run_tests --integration --prefix $PREFIX
 | Integration: A2A Compliance | 25 | Agent card, JSON-RPC, task states, streaming |
 | Integration: Access Control | 3 | Grant/revoke USE_CONNECTION workflow |
 
-## ToDos
+## Roadmap
 
-0. Implement custom MCP integration for model serving to access Databricks Apps: https://docs.databricks.com/aws/en/generative-ai/mcp/custom-mcp?language=Agent+code+%28on-behalf-of-user%29#connect-to-the-custom-mcp-server
-1. Implement auth flows for Gateway to Models (OBO through UC connections, app identity through to target infrastructure)
-2. Implement MLflow Tracing
+- [ ] MCP integration for model serving
+- [ ] MLflow Tracing integration
+- [ ] Additional auth flows (app identity passthrough)
