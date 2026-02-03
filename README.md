@@ -407,6 +407,7 @@ See [tests/README.md](tests/README.md) for details.
 |---|-------|--------|
 | 1 | OAuth token manual passthrough required for OBO auth from Databricks notebooks to Databricks Apps | Tracked internally |
 | 2 | A2A proxy missing `tasks/get`, `tasks/cancel`, `tasks/resubscribe` methods | Open |
+| 3 | Enable agent discovery without requiring `-a2a` suffix on connection names | Open (non-blocking) |
 
 ## Roadmap
 
