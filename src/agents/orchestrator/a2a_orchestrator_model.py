@@ -1,12 +1,14 @@
 import json
 import logging
 import uuid
+from typing import Generator
 
 import mlflow
 from mlflow.pyfunc import ResponsesAgent
 from mlflow.types.responses import (
     ResponsesAgentRequest,
     ResponsesAgentResponse,
+    ResponsesAgentStreamEvent,
     create_text_output_item
 )
 
@@ -286,9 +288,56 @@ class A2AOBOCallingAgent(ResponsesAgent):
             ]
         )
 
-    # TODO: Add predict_stream for streaming support once LangGraph streaming is debugged
-    # def predict_stream(self, request: ResponsesAgentRequest) -> Generator[ResponsesAgentStreamEvent, None, None]:
-    #     ...
+    def predict_stream(
+        self, request: ResponsesAgentRequest
+    ) -> Generator[ResponsesAgentStreamEvent, None, None]:
+        """Handle streaming prediction requests.
+
+        Streams message updates as they become available from the LangGraph agent.
+        """
+        from langchain_core.messages import AIMessage
+
+        agent, messages = self._init_obo_and_agent(request)
+
+        item_id = str(uuid.uuid4())
+        full_response = ""
+
+        # Stream agent execution
+        # create_react_agent streams chunks keyed by node name:
+        # {"agent": {"messages": [...]}} or {"tools": {"messages": [...]}}
+        for chunk in agent.stream({"messages": messages}):
+            # Iterate through node outputs in the chunk
+            for node_name, node_output in chunk.items():
+                if "messages" not in node_output:
+                    continue
+
+                for msg in node_output["messages"]:
+                    # Only stream assistant messages with non-empty content
+                    if not isinstance(msg, AIMessage):
+                        continue
+
+                    content = getattr(msg, 'content', '')
+                    if not content or not content.strip():
+                        continue
+
+                    # Add separator between multiple messages
+                    if full_response:
+                        full_response += "\n\n"
+                        yield ResponsesAgentStreamEvent(
+                            **self.create_text_delta(delta="\n\n", item_id=item_id)
+                        )
+
+                    # Update full response and yield delta
+                    full_response += content
+                    yield ResponsesAgentStreamEvent(
+                        **self.create_text_delta(delta=content, item_id=item_id)
+                    )
+
+        # Final aggregation event with complete response
+        yield ResponsesAgentStreamEvent(
+            type="response.output_item.done",
+            item=self.create_text_output_item(text=full_response, id=item_id)
+        )
 
 
 # Register the agent with MLflow

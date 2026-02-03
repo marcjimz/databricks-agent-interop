@@ -49,4 +49,10 @@ start:
 destroy:
 	databricks bundle destroy --auto-approve
 
-.PHONY: deploy status stop start destroy auth
+test:
+	python -m tests.run_tests --prefix $(PREFIX)
+
+test-unit:
+	python -m pytest tests/unit/ -v
+
+.PHONY: deploy status stop start destroy auth test test-unit

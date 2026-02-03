@@ -1,6 +1,8 @@
 # Databricks A2A Gateway Framework
 
-A framework for [A2A protocol](https://google.github.io/A2A/) interoperability on Databricks, powered by Unity Catalog for agent discovery and access control.
+![./static/img/dbx-banner.jpeg](./static/img/dbx-banner.jpeg)
+
+A framework for [A2A protocol](https://google.github.io/A2A/) interoperability on Databricks, powered by Unity Catalog for agent discovery and access control. Deploy an A2A gateway and let Unity Catalog handle agentic discovery, authorization, and interoperability.
 
 For more on AI Agent Protocols, see: [A Survey of AI Agent Protocols](https://arxiv.org/pdf/2504.16736)
 
@@ -394,28 +396,17 @@ See **[notebooks/README.md](notebooks/README.md#programmatic-access-with-service
 ## Testing
 
 ```bash
-# Install test dependencies
-pip install -r tests/requirements.txt
-
-# Run all tests (unit + integration + A2A compliance)
-python -m tests.run_tests --prefix $PREFIX
-
-# Run only unit tests (no external services needed)
-python -m tests.run_tests --unit
-
-# Run only integration tests
-python -m tests.run_tests --integration --prefix $PREFIX
+make test PREFIX=$PREFIX
 ```
 
-**Test Suite (68 tests):**
-| Category | Tests | Description |
-|----------|-------|-------------|
-| Unit: Models | 9 | AgentInfo, OAuthM2M, responses |
-| Unit: Authorization | 10 | User email extraction, grants checking |
-| Unit: Agents | 8 | Echo returns input, Calculator (2+2=4, etc.) |
-| Integration: Gateway | 13 | Health, discovery, auth (valid/invalid tokens) |
-| Integration: A2A Compliance | 25 | Agent card, JSON-RPC, task states, streaming |
-| Integration: Access Control | 3 | Grant/revoke USE_CONNECTION workflow |
+See [tests/README.md](tests/README.md) for details.
+
+## Known Issues
+
+| # | Issue | Status |
+|---|-------|--------|
+| 1 | OAuth token manual passthrough required for OBO auth from Databricks notebooks to Databricks Apps | Tracked internally |
+| 2 | A2A proxy missing `tasks/get`, `tasks/cancel`, `tasks/resubscribe` methods | Open |
 
 ## Roadmap
 

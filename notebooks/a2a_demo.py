@@ -36,7 +36,7 @@
 # COMMAND ----------
 
 # DBTITLE 1,Install Dependencies
-# MAGIC %pip install httpx a2a-sdk[http-server]>=0.3.0 nest_asyncio pyyaml langchain-core --quiet
+# MAGIC %pip install -r requirements.txt --quiet
 
 # COMMAND ----------
 

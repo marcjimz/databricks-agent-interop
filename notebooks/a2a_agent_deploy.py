@@ -36,7 +36,7 @@
 # COMMAND ----------
 
 # DBTITLE 1,Install Dependencies
-# MAGIC %pip install backoff mlflow>=3.8.0 databricks-agents>=1.9.0 langchain>=1.0.0 langchain-core>=1.0.0 langgraph>=1.0.0 databricks-langchain>=0.13.0 databricks-sdk>=0.78.0 databricks-ai-bridge>=0.10.0 a2a-sdk[http-server]>=0.3.20 httpx>=0.28.0 pyyaml --quiet
+# MAGIC %pip install -r requirements.txt --quiet
 
 # COMMAND ----------
 
@@ -71,10 +71,12 @@ if not settings:
 
 # Create widgets with defaults from settings.yaml
 dbutils.widgets.text("prefix", settings.get("prefix", "marcin"), "Agent Prefix")
-dbutils.widgets.text("workspace_url_suffix", settings.get("workspace_url_suffix", "-1444828305810485.aws.databricksapps.com"), "Workspace URL Suffix")
 dbutils.widgets.text("catalog", settings.get("catalog", "main"), "Catalog Name")
 dbutils.widgets.text("schema", settings.get("schema", "default"), "Schema Name")
 dbutils.widgets.text("foundation_model", settings.get("foundation_model", "databricks-meta-llama-3-1-8b-instruct"), "Foundation Model")
+dbutils.widgets.text("agent_name", settings.get("agent_name", "a2a_orchestrator"), "Agent Name")
+dbutils.widgets.text("experiment_name", settings.get("experiment_name", "a2a-orchestrator-deployment"), "Experiment Name")
+dbutils.widgets.text("endpoint_name", settings.get("endpoint_name", "a2a_orchestrator"), "Endpoint Name")
 
 # COMMAND ----------
 
@@ -89,24 +91,39 @@ w = WorkspaceClient()
 
 # Get configuration from widgets (which have defaults from settings.yaml)
 PREFIX = dbutils.widgets.get("prefix")
-WORKSPACE_URL_SUFFIX = dbutils.widgets.get("workspace_url_suffix")
 CATALOG = dbutils.widgets.get("catalog")
 SCHEMA = dbutils.widgets.get("schema")
 FOUNDATION_MODEL = dbutils.widgets.get("foundation_model")
+AGENT_NAME = dbutils.widgets.get("agent_name")
+EXPERIMENT_BASE_NAME = dbutils.widgets.get("experiment_name")
+ENDPOINT_BASE_NAME = dbutils.widgets.get("endpoint_name")
 
 # Get current user
 username = spark.sql("SELECT current_user()").first()[0]
 normalized_username = username.split('@')[0].replace('.', '_')
 
-# Build gateway URL from prefix and workspace suffix
-GATEWAY_URL = f"https://{PREFIX}-a2a-gateway{WORKSPACE_URL_SUFFIX}"
+# Get gateway URL dynamically from the Databricks App
+GATEWAY_APP_NAME = f"{PREFIX}-a2a-gateway"
+try:
+    gateway_app = w.apps.get(name=GATEWAY_APP_NAME)
+    GATEWAY_URL = gateway_app.url
+    print(f"✅ Found gateway app: {GATEWAY_APP_NAME}")
+except Exception as e:
+    raise ValueError(
+        f"Could not find gateway app '{GATEWAY_APP_NAME}'. "
+        f"Make sure the A2A Gateway is deployed first with 'make deploy PREFIX={PREFIX}'. "
+        f"Error: {e}"
+    )
 
-# Unity Catalog model name
-AGENT_NAME = "a2a_orchestrator"
+# Derived names
 UC_MODEL_NAME = f"{CATALOG}.{SCHEMA}.{AGENT_NAME}_{normalized_username}"
+EXPERIMENT_NAME = f"/Users/{username}/{EXPERIMENT_BASE_NAME}_{normalized_username}"
+ENDPOINT_NAME = f"{PREFIX}-{ENDPOINT_BASE_NAME}"
 
 print(f"✅ Configuration loaded")
 print(f"📍 Unity Catalog Model: {UC_MODEL_NAME}")
+print(f"🔬 Experiment: {EXPERIMENT_NAME}")
+print(f"🚀 Endpoint: {ENDPOINT_NAME}")
 print(f"👤 User: {username}")
 print(f"🤖 Foundation Model: {FOUNDATION_MODEL}")
 print(f"🌐 Gateway URL: {GATEWAY_URL}")
@@ -119,9 +136,7 @@ print(f"🌐 Gateway URL: {GATEWAY_URL}")
 # COMMAND ----------
 
 # DBTITLE 1,Setup MLflow Experiment
-EXPERIMENT_NAME = f"/Users/{username}/a2a-orchestrator-deployment_{normalized_username}"
-
-print(f"🔬 Setting up MLflow experiment...\n")
+print(f"🔬 Setting up MLflow experiment: {EXPERIMENT_NAME}\n")
 
 try:
     experiment_id = mlflow.create_experiment(
@@ -319,25 +334,15 @@ from databricks import agents
 print(f"🚀 Deploying agent to Mosaic AI Framework...\n")
 print(f"   Model: {UC_MODEL_NAME}")
 print(f"   Version: {model_version}")
+print(f"   Endpoint: {ENDPOINT_NAME}")
 print(f"   ⏰ This may take 10-15 minutes...\n")
 
-# Use a new endpoint name to avoid signature conflicts with previous deployments
-# The error "all served models are required to be agents with the same signature"
-# means the old endpoint has incompatible models - deploy to a new endpoint
-ENDPOINT_NAME = f"{PREFIX}-a2a_orchestrator_v2"
-
-# Environment variables passed to the deployed agent
-# These override the defaults in CONFIG and can be changed without relogging
 ENVIRONMENT_VARS = {
     "GATEWAY_URL": GATEWAY_URL,
     "FOUNDATION_MODEL_ENDPOINT": FOUNDATION_MODEL,
     "TEMPERATURE": "0.1",
     "MAX_TOKENS": "1000"
 }
-
-print(f"🔧 Environment Variables:")
-for key, value in ENVIRONMENT_VARS.items():
-    print(f"   {key}: {value}")
 
 deployment = agents.deploy(
     endpoint_name=ENDPOINT_NAME,
@@ -478,9 +483,10 @@ else:
 # COMMAND ----------
 
 # DBTITLE 1,Query Agent via SQL
+# Replace the endpoint name below with your actual endpoint name from the deployment output
 # MAGIC %sql
 # MAGIC SELECT ai_query(
-# MAGIC   'marcin-a2a_orchestrator_v2',
+# MAGIC   '<YOUR_ENDPOINT_NAME>',
 # MAGIC   'Hello! What agents do we have access to?'
 # MAGIC )
 

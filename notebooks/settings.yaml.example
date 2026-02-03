@@ -15,13 +15,14 @@ prefix: "marcin"
 # Leave empty to use WorkspaceClient default auth (works if running in workspace)
 access_token: ""
 
-# Workspace URL suffix (the part after your prefix in app URLs)
-# This is specific to your Databricks workspace
-workspace_url_suffix: "-1444828305810485.aws.databricksapps.com"
-
 # Unity Catalog settings (for model registration)
 catalog: "main"
 schema: "default"
 
 # Foundation model for the orchestrator agent
 foundation_model: "databricks-meta-llama-3-1-8b-instruct"
+
+# Agent deployment settings
+agent_name: "a2a_orchestrator"
+experiment_name: "a2a-orchestrator-deployment"
+endpoint_name: "a2a_orchestrator"
