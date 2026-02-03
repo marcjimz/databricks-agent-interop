@@ -25,18 +25,7 @@ router = APIRouter(prefix="/api/agents", tags=["Agents"])
 
 
 def _get_agent_or_raise(discovery, agent_name: str) -> AgentInfo:
-    """Get agent by name, raising appropriate HTTP exceptions.
-
-    Args:
-        discovery: AgentDiscovery instance with user's OBO token.
-        agent_name: Name of the agent to look up.
-
-    Returns:
-        AgentInfo if found and user has access.
-
-    Raises:
-        HTTPException: 404 if agent not found, 403 if access denied.
-    """
+    """Get agent by name, raising appropriate HTTP exceptions."""
     try:
         agent = discovery.get_agent_by_name(agent_name)
         if not agent:
@@ -70,36 +59,9 @@ async def list_agents(request: Request):
     return AgentListResponse(agents=agents, total=len(agents))
 
 
-@router.get("/{agent_name}", response_model=AgentInfo)
-async def get_agent(agent_name: str, request: Request):
-    """Get information about a specific agent.
-
-    Args:
-        agent_name: Name of the agent (without -a2a suffix).
-
-    Returns:
-        AgentInfo for the requested agent.
-
-    Raises:
-        404: Agent not found.
-        403: User lacks USE_CONNECTION privilege.
-    """
-    auth_token = extract_token_from_request(request)
-    user_email = extract_user_email_from_request(request)
-    discovery = get_discovery(auth_token=auth_token, user_email=user_email)
-    return _get_agent_or_raise(discovery, agent_name)
-
-
 @router.get("/{agent_name}/.well-known/agent.json")
 async def get_agent_card(agent_name: str, request: Request):
-    """Get the A2A agent card for a specific agent.
-
-    Fetches from the agent_card_url stored in the UC connection.
-
-    Raises:
-        404: Agent not found.
-        403: User lacks USE_CONNECTION privilege.
-    """
+    """Get the A2A agent card for a specific agent."""
     auth_token = extract_token_from_request(request)
     user_email = extract_user_email_from_request(request)
     discovery = get_discovery(auth_token=auth_token, user_email=user_email)
@@ -109,31 +71,52 @@ async def get_agent_card(agent_name: str, request: Request):
     return await proxy_service.fetch_agent_card(agent, request)
 
 
-@router.post("/{agent_name}/message")
-async def send_message(agent_name: str, request: Request, body: A2AJsonRpcRequest = None):
-    """Send a message to an A2A agent.
+@router.get("/{agent_name}", response_model=AgentInfo)
+async def get_agent(agent_name: str, request: Request):
+    """Get information about a specific agent."""
+    auth_token = extract_token_from_request(request)
+    user_email = extract_user_email_from_request(request)
+    discovery = get_discovery(auth_token=auth_token, user_email=user_email)
+    return _get_agent_or_raise(discovery, agent_name)
 
-    Proxies the JSON-RPC request to the agent's endpoint URL (from agent card).
 
-    The request body should be a JSON-RPC 2.0 message in A2A format:
-    ```json
-    {
-      "jsonrpc": "2.0",
-      "id": "req-123",
-      "method": "message/send",
-      "params": {
-        "message": {
-          "messageId": "msg-456",
-          "role": "user",
-          "parts": [{"kind": "text", "text": "Your message here"}]
-        }
-      }
-    }
-    ```
+# NOTE: More specific POST routes must come before the catch-all /{agent_name}
 
-    Raises:
-        404: Agent not found.
-        403: User lacks USE_CONNECTION privilege.
+
+@router.post("/{agent_name}/stream")
+async def stream_message(agent_name: str, request: Request, body: A2AJsonRpcRequest = None):
+    """Stream an A2A message response via SSE."""
+    auth_token = extract_token_from_request(request)
+    user_email = extract_user_email_from_request(request)
+    discovery = get_discovery(auth_token=auth_token, user_email=user_email)
+    proxy_service = get_proxy_service()
+
+    agent = _get_agent_or_raise(discovery, agent_name)
+
+    if body:
+        raw_body = json.dumps(body.model_dump()).encode()
+    else:
+        raw_body = await request.body()
+
+    return StreamingResponse(
+        proxy_service.stream_message(agent, request, raw_body),
+        media_type="text/event-stream"
+    )
+
+
+@router.post("/{agent_name}")
+async def rpc_endpoint(agent_name: str, request: Request, body: A2AJsonRpcRequest = None):
+    """A2A JSON-RPC endpoint for an agent.
+
+    Proxies any A2A JSON-RPC request to the agent's endpoint URL.
+
+    Supported methods:
+    - `message/send` - Send a message
+    - `tasks/get` - Get task status by ID
+    - `tasks/cancel` - Cancel a running task
+    - `tasks/resubscribe` - Resubscribe to task updates
+
+    For streaming responses, use the /stream endpoint instead.
     """
     auth_token = extract_token_from_request(request)
     user_email = extract_user_email_from_request(request)
@@ -142,7 +125,6 @@ async def send_message(agent_name: str, request: Request, body: A2AJsonRpcReques
 
     agent = _get_agent_or_raise(discovery, agent_name)
 
-    # Get request body - use the Pydantic model if provided, otherwise read raw body
     if body:
         raw_body = json.dumps(body.model_dump()).encode()
     else:
@@ -152,7 +134,6 @@ async def send_message(agent_name: str, request: Request, body: A2AJsonRpcReques
 
     response = await proxy_service.send_message(agent, request, raw_body, content_type)
 
-    # Handle response
     try:
         content = response.json()
     except Exception:
@@ -161,49 +142,4 @@ async def send_message(agent_name: str, request: Request, body: A2AJsonRpcReques
     return JSONResponse(
         status_code=response.status_code,
         content=content
-    )
-
-
-@router.post("/{agent_name}/stream")
-async def stream_message(agent_name: str, request: Request, body: A2AJsonRpcRequest = None):
-    """Send a streaming message to an A2A agent.
-
-    Proxies the request and streams SSE responses back.
-
-    The request body should be a JSON-RPC 2.0 message in A2A format:
-    ```json
-    {
-      "jsonrpc": "2.0",
-      "id": "req-123",
-      "method": "message/send",
-      "params": {
-        "message": {
-          "messageId": "msg-456",
-          "role": "user",
-          "parts": [{"kind": "text", "text": "Your message here"}]
-        }
-      }
-    }
-    ```
-
-    Raises:
-        404: Agent not found.
-        403: User lacks USE_CONNECTION privilege.
-    """
-    auth_token = extract_token_from_request(request)
-    user_email = extract_user_email_from_request(request)
-    discovery = get_discovery(auth_token=auth_token, user_email=user_email)
-    proxy_service = get_proxy_service()
-
-    agent = _get_agent_or_raise(discovery, agent_name)
-
-    # Get request body - use the Pydantic model if provided, otherwise read raw body
-    if body:
-        raw_body = json.dumps(body.model_dump()).encode()
-    else:
-        raw_body = await request.body()
-
-    return StreamingResponse(
-        proxy_service.stream_message(agent, request, raw_body),
-        media_type="text/event-stream"
     )

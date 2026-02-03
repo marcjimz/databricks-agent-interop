@@ -99,7 +99,7 @@ class TestAccessControlWorkflow:
         conn = self.testable_connections[0]
         conn_name = conn["name"]
         agent_name = f"{prefix}-calculator"  # Use full agent name with prefix
-        endpoint = f"{gateway_url}/api/agents/{agent_name}/message"
+        endpoint = f"{gateway_url}/api/agents/{agent_name}"
         message = make_a2a_message("What is 1 + 1?")
 
         print(f"\n=== Testing access control on {conn_name} (owner: {conn['owner']}) ===")
@@ -190,7 +190,7 @@ class TestAccessDeniedResponse:
         try:
             message = make_a2a_message("Test")
             response = http_client.post(
-                f"{gateway_url}/api/agents/{agent_name}/message",
+                f"{gateway_url}/api/agents/{agent_name}",
                 json=message
             )
 

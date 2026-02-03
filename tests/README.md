@@ -16,7 +16,7 @@ make test-unit
 python -m tests.run_tests --integration --prefix $PREFIX
 ```
 
-## Test Suite (85 tests)
+## Test Suite (105+ tests)
 
 | Category | Tests | Description |
 |----------|-------|-------------|
@@ -27,6 +27,7 @@ python -m tests.run_tests --integration --prefix $PREFIX
 | Integration: Gateway | 13 | Health, discovery, auth (valid/invalid tokens) |
 | Integration: A2A Compliance | 25 | Agent card, JSON-RPC, task states, streaming |
 | Integration: Access Control | 3 | Grant/revoke USE_CONNECTION workflow |
+| Integration: A2A SDK Client | 20+ | SDK patterns used in demo notebook |
 
 ## Unit Tests
 
@@ -75,6 +76,19 @@ Integration tests require deployed infrastructure (gateway and agents).
 - Grant `USE_CONNECTION` workflow
 - Revoke access workflow
 - 403 responses for unauthorized access
+
+### A2A SDK Client (`test_a2a_sdk_client.py`)
+Tests the same A2A SDK patterns used in the demo notebook (`notebooks/a2a_demo.py`).
+These tests catch SDK API changes before they break user-facing demos.
+
+- **A2ACardResolver**: Agent card discovery and parsing
+- **ClientFactory.connect()**: Modern client creation (replaces deprecated `A2AClient`)
+- **client.send_message(Message)**: Core messaging API - verifies Message is accepted directly
+- **client.send_message_streaming(Message)**: SSE streaming API
+- **client.get_task(TaskQueryParams)**: Task lifecycle management
+- **Message construction**: Part/TextPart patterns
+
+*Note: These tests require `ECHO_AGENT_URL` and `CALCULATOR_AGENT_URL` environment variables.*
 
 ## Environment Variables
 

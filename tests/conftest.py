@@ -152,7 +152,7 @@ def make_a2a_message(
     context_id: str = None,
     task_id: str = None
 ) -> dict:
-    """Create an A2A JSON-RPC message.
+    """Create an A2A JSON-RPC message/send request.
 
     Args:
         text: The message text content.
@@ -178,5 +178,92 @@ def make_a2a_message(
         "jsonrpc": "2.0",
         "id": "1",
         "method": "message/send",
+        "params": {"message": message}
+    }
+
+
+def make_tasks_get_request(task_id: str) -> dict:
+    """Create an A2A JSON-RPC tasks/get request.
+
+    Args:
+        task_id: The task ID to retrieve.
+
+    Returns:
+        A2A JSON-RPC tasks/get request dict.
+    """
+    return {
+        "jsonrpc": "2.0",
+        "id": "1",
+        "method": "tasks/get",
+        "params": {"id": task_id}
+    }
+
+
+def make_tasks_cancel_request(task_id: str) -> dict:
+    """Create an A2A JSON-RPC tasks/cancel request.
+
+    Args:
+        task_id: The task ID to cancel.
+
+    Returns:
+        A2A JSON-RPC tasks/cancel request dict.
+    """
+    return {
+        "jsonrpc": "2.0",
+        "id": "1",
+        "method": "tasks/cancel",
+        "params": {"id": task_id}
+    }
+
+
+def make_tasks_resubscribe_request(task_id: str) -> dict:
+    """Create an A2A JSON-RPC tasks/resubscribe request.
+
+    Args:
+        task_id: The task ID to resubscribe to.
+
+    Returns:
+        A2A JSON-RPC tasks/resubscribe request dict.
+    """
+    return {
+        "jsonrpc": "2.0",
+        "id": "1",
+        "method": "tasks/resubscribe",
+        "params": {"id": task_id}
+    }
+
+
+def make_message_stream_request(
+    text: str,
+    message_id: str = "msg-1",
+    context_id: str = None,
+    task_id: str = None
+) -> dict:
+    """Create an A2A JSON-RPC message/stream request (streaming variant).
+
+    Args:
+        text: The message text content.
+        message_id: Message ID.
+        context_id: Optional context ID.
+        task_id: Optional task ID.
+
+    Returns:
+        A2A JSON-RPC message/stream request dict.
+    """
+    message = {
+        "messageId": message_id,
+        "role": "user",
+        "parts": [{"kind": "text", "text": text}]
+    }
+
+    if context_id:
+        message["contextId"] = context_id
+    if task_id:
+        message["taskId"] = task_id
+
+    return {
+        "jsonrpc": "2.0",
+        "id": "1",
+        "method": "message/stream",
         "params": {"message": message}
     }

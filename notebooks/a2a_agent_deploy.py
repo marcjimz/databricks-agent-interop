@@ -483,12 +483,13 @@ else:
 # COMMAND ----------
 
 # DBTITLE 1,Query Agent via SQL
-# Replace the endpoint name below with your actual endpoint name from the deployment output
-# MAGIC %sql
-# MAGIC SELECT ai_query(
-# MAGIC   '<YOUR_ENDPOINT_NAME>',
-# MAGIC   'Hello! What agents do we have access to?'
-# MAGIC )
+result = spark.sql(f"""
+  SELECT ai_query(
+    '{endpoint_name}',
+    'Hello! What agents do we have access to?'
+  ) AS response
+""")
+display(result)
 
 # COMMAND ----------
 

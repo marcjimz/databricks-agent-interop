@@ -1,0 +1,20 @@
+[project]
+name = "databricks-a2a-gateway"
+version = "1.0.0"
+description = "A2A Protocol Gateway for Databricks with Unity Catalog integration"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+asyncio_mode = "auto"
+markers = [
+    "integration: Integration tests requiring live services",
+    "unit: Unit tests that don't require external services",
+]
+filterwarnings = [
+    "ignore::UserWarning:google.protobuf.runtime_version",
+]

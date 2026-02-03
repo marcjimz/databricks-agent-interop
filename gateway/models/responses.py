@@ -62,12 +62,12 @@ class A2AMessageParams(BaseModel):
 class A2AJsonRpcRequest(BaseModel):
     """A2A JSON-RPC 2.0 request format.
 
-    This is the standard format for sending messages to A2A agents.
+    Supports all A2A methods: message/send, tasks/get, tasks/cancel, tasks/resubscribe.
     """
     jsonrpc: Literal["2.0"] = Field("2.0", description="JSON-RPC version")
     id: str = Field(..., description="Request ID for correlation", examples=["req-456"])
-    method: Literal["message/send"] = Field("message/send", description="A2A method to call")
-    params: A2AMessageParams = Field(..., description="Method parameters")
+    method: str = Field(..., description="A2A method (message/send, tasks/get, tasks/cancel, tasks/resubscribe)")
+    params: Any = Field(..., description="Method parameters")
 
     model_config = {
         "json_schema_extra": {
