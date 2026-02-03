@@ -37,8 +37,55 @@ For more on AI Agent Protocols, see: [A Survey of AI Agent Protocols](https://ar
 |----------|---------|
 | `GET /api/agents` | List accessible agents |
 | `GET /api/agents/{name}` | Get agent info |
-| `POST /api/agents/{name}/message` | Send A2A message |
+| `GET /api/agents/{name}/.well-known/agent.json` | Get agent card |
+| `POST /api/agents/{name}` | A2A JSON-RPC proxy (see below) |
+| `POST /api/agents/{name}/stream` | A2A streaming via SSE |
 | `GET /docs` | Swagger UI |
+
+### A2A JSON-RPC Proxy
+
+The `POST /api/agents/{name}` endpoint is a fully **A2A-compliant JSON-RPC proxy** that supports all standard A2A methods:
+
+| Method | Description | Example |
+|--------|-------------|---------|
+| `message/send` | Send a message to an agent | Start a new task |
+| `tasks/get` | Get task status by ID | Poll for completion |
+| `tasks/cancel` | Cancel a running task | Abort long-running work |
+| `tasks/resubscribe` | Resubscribe to task updates | Resume after disconnect |
+
+**Example: Send a message**
+```bash
+curl -X POST "${GATEWAY_URL}/api/agents/marcin-echo" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": "1",
+    "method": "message/send",
+    "params": {
+      "message": {
+        "messageId": "msg-1",
+        "role": "user",
+        "parts": [{"kind": "text", "text": "Hello!"}]
+      }
+    }
+  }'
+```
+
+**Example: Get task status**
+```bash
+curl -X POST "${GATEWAY_URL}/api/agents/marcin-calculator" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": "2",
+    "method": "tasks/get",
+    "params": {"id": "task-uuid-here"}
+  }'
+```
+
+The gateway proxies all JSON-RPC requests to the downstream agent while enforcing Unity Catalog access control.
 
 ## Quick Start
 
@@ -406,8 +453,8 @@ See [tests/README.md](tests/README.md) for details.
 | # | Issue | Status |
 |---|-------|--------|
 | 1 | OAuth token manual passthrough required for OBO auth from Databricks notebooks to Databricks Apps | Tracked internally |
-| 2 | A2A proxy missing `tasks/get`, `tasks/cancel`, `tasks/resubscribe` methods | Open |
-| 3 | Enable agent discovery without requiring `-a2a` suffix on connection names | Open (non-blocking) |
+| 2 | Enable agent discovery without requiring `-a2a` suffix on connection names | Open (non-blocking) |
+| 3 | Fix swagger documentation to support OAuth token injection from the UI via OBO | Open (non-blocking) |
 
 ## Roadmap
 

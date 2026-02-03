@@ -7,10 +7,11 @@
 # MAGIC **Features demonstrated:**
 # MAGIC 1. **Agent Discovery** - Resolve agent cards via `A2ACardResolver`
 # MAGIC 2. **A2A Client** - Send messages using `A2AClient`
-# MAGIC 3. **Streaming** - Real-time SSE responses
-# MAGIC 4. **Multi-Agent Orchestration** - Call multiple agents
+# MAGIC 3. **Task Lifecycle** - Get task status, cancel tasks
+# MAGIC 4. **Streaming** - Real-time SSE responses
+# MAGIC 5. **Multi-Agent Orchestration** - Call multiple agents
 # MAGIC
-# MAGIC Reference: [A2A Protocol Specification](https://a2a-protocol.org/latest/specification/)
+# MAGIC Reference: [A2A Protocol Specification](https://google.github.io/A2A/)
 
 # COMMAND ----------
 
@@ -19,7 +20,7 @@
 # MAGIC
 # MAGIC ### Configuration
 # MAGIC
-# MAGIC Default values are loaded from `notebooks/settings.yaml`. You can override any value using the widgets above.
+# MAGIC Default values are loaded from `notebooks/settings.yaml`. URLs are discovered automatically from Databricks Apps.
 # MAGIC
 # MAGIC ### Getting an OAuth Token
 # MAGIC
@@ -28,10 +29,6 @@
 # MAGIC ```bash
 # MAGIC databricks auth token --host "${DATABRICKS_HOST}"
 # MAGIC ```
-# MAGIC
-# MAGIC Copy the token and paste it into the **access_token** widget (or `settings.yaml` for persistence).
-# MAGIC
-# MAGIC > **Note:** Tokens expire after ~1 hour. If you get 401/302 errors, generate a new token.
 
 # COMMAND ----------
 
@@ -49,7 +46,7 @@ dbutils.library.restartPython()
 import yaml
 from pathlib import Path
 
-# Load settings from YAML file to get defaults for widgets
+# Load settings from YAML file
 possible_paths = [
     Path("/Workspace/Users") / spark.sql("SELECT current_user()").first()[0] / ".bundle/a2a-gateway/dev/files/notebooks/settings.yaml",
     Path("settings.yaml"),
@@ -69,9 +66,8 @@ for path in possible_paths:
 if not settings:
     print("No settings.yaml found - using hardcoded defaults")
 
-# Create widgets with defaults from settings.yaml
+# Create widgets
 dbutils.widgets.text("prefix", settings.get("prefix", "marcin"), "Agent Prefix")
-dbutils.widgets.text("workspace_url_suffix", settings.get("workspace_url_suffix", "-1444828305810485.aws.databricksapps.com"), "Workspace URL Suffix")
 dbutils.widgets.text("access_token", settings.get("access_token", ""), "OAuth Access Token")
 
 # COMMAND ----------
@@ -87,13 +83,14 @@ from uuid import uuid4
 import nest_asyncio
 nest_asyncio.apply()
 
-# A2A SDK imports
-from a2a.client import A2ACardResolver, ClientFactory, ClientConfig
-from a2a.types import Message, Part, TextPart
+from databricks.sdk import WorkspaceClient
 
-# Get configuration from widgets (which have defaults from settings.yaml)
+# A2A SDK imports
+from a2a.client import A2ACardResolver, A2AClient
+from a2a.types import Message, Part, TextPart, MessageSendParams
+
+# Get configuration from widgets
 PREFIX = dbutils.widgets.get("prefix")
-WORKSPACE_URL_SUFFIX = dbutils.widgets.get("workspace_url_suffix")
 ACCESS_TOKEN = dbutils.widgets.get("access_token")
 
 # Validate access token
@@ -102,22 +99,31 @@ if not ACCESS_TOKEN:
         "access_token widget is empty!\n\n"
         "To get a token, run this command locally:\n"
         "  databricks auth token --host \"${DATABRICKS_HOST}\"\n\n"
-        "Then paste the token into the 'access_token' widget above and re-run this cell.\n"
-        "For persistence, add it to settings.yaml."
+        "Then paste the token into the 'access_token' widget above."
     )
 
-# Build URLs from prefix and workspace suffix
-GATEWAY_URL = f"https://{PREFIX}-a2a-gateway{WORKSPACE_URL_SUFFIX}"
-ECHO_AGENT_URL = f"https://{PREFIX}-echo-agent{WORKSPACE_URL_SUFFIX}"
-CALC_AGENT_URL = f"https://{PREFIX}-calculator-agent{WORKSPACE_URL_SUFFIX}"
+# Discover URLs from Databricks Apps SDK
+w = WorkspaceClient()
 
-# Build auth headers from the token
+def get_app_url(app_name: str) -> str:
+    """Get the URL for a Databricks App by name."""
+    try:
+        app = w.apps.get(name=app_name)
+        return app.url
+    except Exception as e:
+        raise ValueError(f"Could not find app '{app_name}': {e}")
+
+GATEWAY_URL = get_app_url(f"{PREFIX}-a2a-gateway")
+ECHO_AGENT_URL = get_app_url(f"{PREFIX}-echo-agent")
+CALC_AGENT_URL = get_app_url(f"{PREFIX}-calculator-agent")
+
+# Build auth headers
 AUTH_HEADERS = {"Authorization": f"Bearer {ACCESS_TOKEN}"}
 
-print(f"Gateway URL: {GATEWAY_URL}")
-print(f"Echo Agent URL: {ECHO_AGENT_URL}")
-print(f"Calculator Agent URL: {CALC_AGENT_URL}")
-print(f"Auth Token: ✓ Configured ({len(ACCESS_TOKEN)} chars)")
+print(f"✅ Gateway URL: {GATEWAY_URL}")
+print(f"✅ Echo Agent URL: {ECHO_AGENT_URL}")
+print(f"✅ Calculator Agent URL: {CALC_AGENT_URL}")
+print(f"✅ Auth Token: Configured ({len(ACCESS_TOKEN)} chars)")
 
 # COMMAND ----------
 
@@ -125,47 +131,17 @@ print(f"Auth Token: ✓ Configured ({len(ACCESS_TOKEN)} chars)")
 # MAGIC ## 1. A2A Agent Card Resolution
 # MAGIC
 # MAGIC The `A2ACardResolver` fetches and parses the agent card from `/.well-known/agent.json`.
-# MAGIC Use `http_kwargs` to pass authentication headers for protected endpoints. If you get 302 below, double check your token.
 
 # COMMAND ----------
 
-# DBTITLE 1,Resolve Agent Cards with A2A SDK
+# DBTITLE 1,Resolve Agent Cards
 async def resolve_agent_card(base_url: str, headers: dict = None):
-    """Resolve an agent card using A2ACardResolver with proper auth headers.
-
-    Args:
-        base_url: The base URL of the A2A agent.
-        headers: Optional dict of HTTP headers for authentication.
-
-    Returns:
-        The agent's AgentCard object.
-    """
-    # Build http_kwargs with headers
-    http_kwargs = {}
-    if headers:
-        http_kwargs["headers"] = headers
-
+    """Resolve an agent card using A2ACardResolver."""
     async with httpx.AsyncClient(timeout=60.0, headers=headers) as client:
         resolver = A2ACardResolver(httpx_client=client, base_url=base_url)
-        # Pass auth headers via http_kwargs parameter
-        card = await resolver.get_agent_card(http_kwargs=http_kwargs)
+        card = await resolver.get_agent_card(http_kwargs={"headers": headers} if headers else None)
         return card
 
-# Resolve the Gateway's agent card
-print("═" * 60)
-print("GATEWAY AGENT CARD")
-print("═" * 60)
-gateway_card = asyncio.run(resolve_agent_card(GATEWAY_URL, AUTH_HEADERS))
-print(f"Name: {gateway_card.name}")
-print(f"Description: {gateway_card.description}")
-print(f"Version: {gateway_card.version}")
-print(f"URL: {gateway_card.url}")
-print(f"Capabilities: streaming={gateway_card.capabilities.streaming if gateway_card.capabilities else 'N/A'}")
-print(f"Skills: {[s.name for s in gateway_card.skills] if gateway_card.skills else []}")
-
-# COMMAND ----------
-
-# DBTITLE 1,Resolve Echo Agent Card
 print("═" * 60)
 print("ECHO AGENT CARD")
 print("═" * 60)
@@ -186,255 +162,277 @@ calc_card = asyncio.run(resolve_agent_card(CALC_AGENT_URL, AUTH_HEADERS))
 print(f"Name: {calc_card.name}")
 print(f"Description: {calc_card.description}")
 print(f"Version: {calc_card.version}")
-print(f"Capabilities: streaming={calc_card.capabilities.streaming if calc_card.capabilities else 'N/A'}")
 print(f"Skills:")
 for skill in calc_card.skills or []:
     print(f"  • {skill.name}: {skill.description}")
-    if skill.examples:
-        print(f"    Examples: {skill.examples}")
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## 2. Send Messages with A2A Client
 # MAGIC
-# MAGIC The `ClientFactory` creates clients for JSON-RPC messaging with A2A agents.
+# MAGIC Use `A2AClient` for direct communication with A2A agents.
 
 # COMMAND ----------
 
 # DBTITLE 1,A2A Client Helper
-def extract_text_from_response(response) -> str:
-    """Extract text from A2A response (handles both tuple and Message types).
-
-    send_message() yields either:
-    - tuple[Task, Update] where Task has artifacts
-    - Message with parts
-    """
-    if response is None:
-        return ""
-
-    # Handle tuple (Task, Update) response
-    if isinstance(response, tuple):
-        task, update = response
-        if task and task.artifacts:
-            for artifact in task.artifacts:
-                for part in artifact.parts:
-                    if hasattr(part, 'root') and hasattr(part.root, 'text'):
-                        return part.root.text
-        return ""
-
-    # Handle Message response
-    if hasattr(response, 'parts'):
-        for part in response.parts:
-            if hasattr(part, 'root') and hasattr(part.root, 'text'):
-                return part.root.text
-        return ""
-
-    return str(response)
+def extract_text_from_task(task) -> str:
+    """Extract text from A2A Task response."""
+    if task and task.artifacts:
+        for artifact in task.artifacts:
+            for part in artifact.parts:
+                if hasattr(part, 'root') and hasattr(part.root, 'text'):
+                    return part.root.text
+    return ""
 
 
-async def send_a2a_message(base_url: str, text: str, headers: dict = None) -> dict:
-    """Send a message to an A2A agent using the official SDK ClientFactory.
+async def call_a2a_agent(base_url: str, message_text: str, headers: dict = None) -> dict:
+    """Call an A2A agent using the official SDK.
 
-    Returns a dict with 'text' (extracted response) and 'raw' (full response).
+    This is the reference implementation for calling A2A agents directly.
+
+    Args:
+        base_url: The base URL of the A2A agent
+        message_text: The message to send
+        headers: Optional auth headers
+
+    Returns:
+        Dict with 'text' (response), 'task_id', and 'task_state'
     """
     async with httpx.AsyncClient(timeout=60.0, headers=headers) as httpx_client:
-        # First resolve the agent card
+        # Resolve agent card
         resolver = A2ACardResolver(httpx_client=httpx_client, base_url=base_url)
         card = await resolver.get_agent_card(http_kwargs={"headers": headers} if headers else None)
 
-        # Ensure card URL is absolute (SDK may use relative URL from card)
+        # Fix relative URL
         if card.url and not card.url.startswith("http"):
             card.url = base_url.rstrip("/") + "/" + card.url.lstrip("/")
 
-        # Create client config with httpx client
-        config = ClientConfig(httpx_client=httpx_client)
+        # Create A2A client
+        client = A2AClient(httpx_client=httpx_client, agent_card=card)
 
-        # Create client from the card with absolute URL
-        factory = ClientFactory(config=config)
-        client = factory.create(card=card)
-
-        # Create Message object (new SDK API)
+        # Create message
         message = Message(
             messageId=str(uuid4()),
             role="user",
-            parts=[Part(root=TextPart(text=text))]
+            parts=[Part(root=TextPart(text=message_text))]
         )
 
-        # Send message - returns async iterator yielding (Task, Update) or Message
+        # Send message and collect response
         final_task = None
-        final_response = None
-        async for event in client.send_message(message):
+        async for event in client.send_message(MessageSendParams(message=message)):
             if isinstance(event, tuple):
-                task, update = event
-                final_task = task  # Task accumulates state
-            else:
-                final_response = event
-
-        # Extract text from response
-        response_text = ""
-        raw_response = None
-
-        if final_task:
-            raw_response = final_task.model_dump(mode="json")
-            response_text = extract_text_from_response((final_task, None))
-        elif final_response:
-            raw_response = final_response.model_dump(mode="json") if hasattr(final_response, 'model_dump') else str(final_response)
-            response_text = extract_text_from_response(final_response)
+                task, _ = event
+                final_task = task
 
         return {
-            "text": response_text,
-            "raw": raw_response
+            "text": extract_text_from_task(final_task) if final_task else "",
+            "task_id": final_task.id if final_task else None,
+            "task_state": final_task.status.state.value if final_task and final_task.status else None,
+            "task": final_task
         }
 
 # COMMAND ----------
 
-# MAGIC %md
-# MAGIC ### Demo: Echo Agent with A2A Client
-
-# COMMAND ----------
-
 # DBTITLE 1,Test Echo Agent
-print("Sending message to Echo Agent via A2A Client...")
+print("Sending message to Echo Agent...")
 print("-" * 40)
 
-response = asyncio.run(send_a2a_message(
+response = asyncio.run(call_a2a_agent(
     ECHO_AGENT_URL,
     "Hello from the A2A SDK Client!",
     AUTH_HEADERS
 ))
 
-print(f"Response text: {response['text']}")
-print()
-print("Raw response:")
-print(json.dumps(response['raw'], indent=2))
+print(f"Response: {response['text']}")
+print(f"Task ID: {response['task_id']}")
+print(f"Task State: {response['task_state']}")
 
 # COMMAND ----------
 
-# MAGIC %md
-# MAGIC ### Demo: Calculator Agent with A2A Client
-
-# COMMAND ----------
-
-# DBTITLE 1,Test Calculator Agent - Basic Operations
+# DBTITLE 1,Test Calculator Agent
 operations = [
     "Add 15 and 27",
     "Multiply 6 by 7",
     "Divide 100 by 4",
-    "What is 25 times 4?"
 ]
 
 for op in operations:
     print(f"Request: {op}")
-    response = asyncio.run(send_a2a_message(CALC_AGENT_URL, op, AUTH_HEADERS))
+    response = asyncio.run(call_a2a_agent(CALC_AGENT_URL, op, AUTH_HEADERS))
     print(f"Result: {response['text']}")
+    print(f"Task State: {response['task_state']}")
     print()
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 3. Streaming with A2A Client
+# MAGIC ## 3. Task Lifecycle Management
 # MAGIC
-# MAGIC The A2A SDK supports streaming responses via SSE using `send_message_streaming`.
+# MAGIC A2A supports async task management with `tasks/get` and `tasks/cancel`.
 
 # COMMAND ----------
 
-# DBTITLE 1,Stream Messages with A2A Client
+# DBTITLE 1,Task Lifecycle Demo
+async def demo_task_lifecycle():
+    """Demonstrate A2A task lifecycle: send, get status, complete."""
+    print("═" * 60)
+    print("A2A TASK LIFECYCLE DEMO")
+    print("═" * 60)
+
+    async with httpx.AsyncClient(timeout=60.0, headers=AUTH_HEADERS) as httpx_client:
+        # Resolve agent card
+        resolver = A2ACardResolver(httpx_client=httpx_client, base_url=CALC_AGENT_URL)
+        card = await resolver.get_agent_card(http_kwargs={"headers": AUTH_HEADERS})
+
+        if card.url and not card.url.startswith("http"):
+            card.url = CALC_AGENT_URL.rstrip("/") + "/" + card.url.lstrip("/")
+
+        client = A2AClient(httpx_client=httpx_client, agent_card=card)
+
+        # Step 1: Send a message
+        print("\n1. Sending message...")
+        message = Message(
+            messageId=str(uuid4()),
+            role="user",
+            parts=[Part(root=TextPart(text="Multiply 123 by 456"))]
+        )
+
+        task_id = None
+        final_task = None
+        async for event in client.send_message(MessageSendParams(message=message)):
+            if isinstance(event, tuple):
+                task, update = event
+                task_id = task.id
+                final_task = task
+                print(f"   Task ID: {task_id}")
+                print(f"   State: {task.status.state.value if task.status else 'unknown'}")
+
+        # Step 2: Get task status (if task completed quickly, this shows final state)
+        if task_id:
+            print("\n2. Getting task status...")
+            try:
+                task_status = await client.get_task(task_id)
+                print(f"   Task ID: {task_status.id}")
+                print(f"   State: {task_status.status.state.value if task_status.status else 'unknown'}")
+                if task_status.artifacts:
+                    result = extract_text_from_task(task_status)
+                    print(f"   Result: {result}")
+            except Exception as e:
+                print(f"   Status check: {e}")
+
+        # Step 3: Show final result
+        print("\n3. Final result:")
+        if final_task:
+            result = extract_text_from_task(final_task)
+            print(f"   {result}")
+
+        print("\n" + "═" * 60)
+
+asyncio.run(demo_task_lifecycle())
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 4. Streaming with A2A Client
+# MAGIC
+# MAGIC Stream responses in real-time using SSE.
+
+# COMMAND ----------
+
+# DBTITLE 1,Streaming Demo
 async def stream_a2a_message(base_url: str, text: str, headers: dict = None):
-    """Stream a message response from an A2A agent using the SDK ClientFactory."""
+    """Stream a message response from an A2A agent."""
     async with httpx.AsyncClient(timeout=60.0, headers=headers) as httpx_client:
-        # First resolve the agent card
         resolver = A2ACardResolver(httpx_client=httpx_client, base_url=base_url)
         card = await resolver.get_agent_card(http_kwargs={"headers": headers} if headers else None)
 
-        # Ensure card URL is absolute
         if card.url and not card.url.startswith("http"):
             card.url = base_url.rstrip("/") + "/" + card.url.lstrip("/")
 
-        # Create client config with streaming enabled
-        config = ClientConfig(httpx_client=httpx_client, streaming=True)
+        client = A2AClient(httpx_client=httpx_client, agent_card=card)
 
-        # Create client from the card
-        factory = ClientFactory(config=config)
-        client = factory.create(card=card)
-
-        # Create Message object (new SDK API)
         message = Message(
             messageId=str(uuid4()),
             role="user",
             parts=[Part(root=TextPart(text=text))]
         )
 
-        # Stream the response
         print("Streaming response:")
         print("-" * 40)
 
-        async for event in client.send_message(message):
-            # Handle different event types - can be (Task, Update) tuple or Message
+        async for event in client.send_message(MessageSendParams(message=message)):
             if isinstance(event, tuple):
                 task, update = event
-                if task:
-                    print(f"Task state: {task.status.state if task.status else 'unknown'}")
-                if update and hasattr(update, 'artifact'):
-                    artifact = update.artifact
-                    if artifact and artifact.parts:
-                        for part in artifact.parts:
-                            if hasattr(part, 'root') and hasattr(part.root, 'text'):
-                                print(f"Artifact: {part.root.text}")
-            elif hasattr(event, 'parts'):
-                # It's a Message response
-                for part in event.parts:
-                    if hasattr(part, 'root') and hasattr(part.root, 'text'):
-                        print(f"Response: {part.root.text}")
+                state = task.status.state.value if task.status else "unknown"
+                print(f"Task state: {state}")
+                if task.artifacts:
+                    result = extract_text_from_task(task)
+                    if result:
+                        print(f"Result: {result}")
 
         print("-" * 40)
 
-# COMMAND ----------
-
-# DBTITLE 1,Demo: Streaming with Echo Agent
-print("Testing streaming with Echo Agent:\n")
-asyncio.run(stream_a2a_message(ECHO_AGENT_URL, "This message is being streamed!", AUTH_HEADERS))
-
-# COMMAND ----------
-
-# DBTITLE 1,Demo: Streaming with Calculator Agent
 print("Testing streaming with Calculator Agent:\n")
-asyncio.run(stream_a2a_message(CALC_AGENT_URL, "What is 123 plus 456?", AUTH_HEADERS))
+asyncio.run(stream_a2a_message(CALC_AGENT_URL, "What is 999 plus 1?", AUTH_HEADERS))
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 4. Calling Agents via the Gateway
+# MAGIC ## 5. Calling Agents via the Gateway
 # MAGIC
-# MAGIC The gateway proxies requests to downstream agents while enforcing UC connection access control.
+# MAGIC The gateway proxies requests while enforcing UC connection access control.
 
 # COMMAND ----------
 
 # DBTITLE 1,Gateway Proxy Helper
-async def call_agent_via_gateway(agent_name: str, text: str, headers: dict):
-    """Call an agent through the A2A Gateway using raw HTTP (gateway proxy)."""
-    # Merge auth headers with content-type
-    request_headers = dict(headers) if headers else {}
-    request_headers["Content-Type"] = "application/json"
+async def call_agent_via_gateway(agent_name: str, text: str, method: str = "message/send") -> dict:
+    """Call an agent through the A2A Gateway.
 
-    # Create A2A message
-    message = {
-        "jsonrpc": "2.0",
-        "id": str(uuid4()),
-        "method": "message/send",
-        "params": {
+    This uses the gateway's JSON-RPC proxy endpoint which supports:
+    - message/send: Send a message
+    - tasks/get: Get task status
+    - tasks/cancel: Cancel a task
+
+    Args:
+        agent_name: The agent name (without -a2a suffix)
+        text: The message text (for message/send) or task_id (for tasks/get)
+        method: The JSON-RPC method
+
+    Returns:
+        The JSON-RPC response
+    """
+    headers = dict(AUTH_HEADERS)
+    headers["Content-Type"] = "application/json"
+
+    # Build JSON-RPC request based on method
+    if method == "message/send":
+        params = {
             "message": {
                 "messageId": str(uuid4()),
                 "role": "user",
                 "parts": [{"kind": "text", "text": text}]
             }
         }
+    elif method == "tasks/get":
+        params = {"id": text}  # text is task_id for this method
+    elif method == "tasks/cancel":
+        params = {"id": text}
+    else:
+        params = {}
+
+    request_body = {
+        "jsonrpc": "2.0",
+        "id": str(uuid4()),
+        "method": method,
+        "params": params
     }
 
-    async with httpx.AsyncClient(timeout=60.0, headers=request_headers) as client:
+    async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.post(
-            f"{GATEWAY_URL}/api/agents/{agent_name}/message",
-            json=message
+            f"{GATEWAY_URL}/api/agents/{agent_name}",
+            json=request_body,
+            headers=headers
         )
         response.raise_for_status()
         return response.json()
@@ -443,22 +441,22 @@ async def call_agent_via_gateway(agent_name: str, text: str, headers: dict):
 
 # DBTITLE 1,Call Echo Agent via Gateway
 print("Calling Echo Agent via Gateway...")
-response = asyncio.run(call_agent_via_gateway(f"{PREFIX}-echo", "Hello via Gateway!", AUTH_HEADERS))
+response = asyncio.run(call_agent_via_gateway(f"{PREFIX}-echo", "Hello via Gateway!"))
 print(json.dumps(response, indent=2))
 
 # COMMAND ----------
 
 # DBTITLE 1,Call Calculator Agent via Gateway
 print("Calling Calculator Agent via Gateway...")
-response = asyncio.run(call_agent_via_gateway(f"{PREFIX}-calculator", "Multiply 7 by 8", AUTH_HEADERS))
+response = asyncio.run(call_agent_via_gateway(f"{PREFIX}-calculator", "Multiply 7 by 8"))
 print(json.dumps(response, indent=2))
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 5. Multi-Agent Workflow
+# MAGIC ## 6. Multi-Agent Workflow
 # MAGIC
-# MAGIC Demonstrate orchestrating multiple agents using the A2A Client.
+# MAGIC Orchestrate multiple agents using the A2A Client.
 
 # COMMAND ----------
 
@@ -466,139 +464,67 @@ print(json.dumps(response, indent=2))
 async def multi_agent_workflow():
     """Demonstrate a workflow using multiple A2A agents."""
     print("═" * 60)
-    print("MULTI-AGENT WORKFLOW USING A2A SDK")
+    print("MULTI-AGENT WORKFLOW")
     print("═" * 60)
     print()
 
-    headers = AUTH_HEADERS
+    # Step 1: Test connectivity
+    print("Step 1: Testing Echo Agent...")
+    echo_result = await call_a2a_agent(ECHO_AGENT_URL, "System check", AUTH_HEADERS)
+    print(f"  ✓ Echo: {echo_result['text']}")
+    print()
 
-    async with httpx.AsyncClient(timeout=60.0, headers=headers) as httpx_client:
-        # Create reusable client config and factory
-        config = ClientConfig(httpx_client=httpx_client)
-        factory = ClientFactory(config=config)
+    # Step 2: Perform calculations
+    print("Step 2: Calculations...")
+    calculations = [
+        ("Revenue", "Multiply 1250 by 12"),
+        ("Tax (25%)", "Multiply 15000 by 0.25"),
+        ("Net", "Subtract 3750 from 15000")
+    ]
 
-        # Step 1: Discover agents and create clients using ClientFactory
-        print("Step 1: Discovering agents and creating clients...")
+    for label, expr in calculations:
+        result = await call_a2a_agent(CALC_AGENT_URL, expr, AUTH_HEADERS)
+        print(f"  {label}: {result['text']}")
+    print()
 
-        clients = {}
-        for name, url in [("echo", ECHO_AGENT_URL), ("calculator", CALC_AGENT_URL)]:
-            # Resolve card and fix URL
-            resolver = A2ACardResolver(httpx_client=httpx_client, base_url=url)
-            card = await resolver.get_agent_card(http_kwargs={"headers": headers})
-            if card.url and not card.url.startswith("http"):
-                card.url = url.rstrip("/") + "/" + card.url.lstrip("/")
-            client = factory.create(card=card)
-            clients[name] = client
-            print(f"  ✓ Connected to {name} agent")
-        print()
-
-        # Step 2: Test connectivity with Echo
-        print("Step 2: Testing connectivity with Echo Agent...")
-        echo_message = Message(
-            messageId=str(uuid4()),
-            role="user",
-            parts=[Part(root=TextPart(text="System check: A2A active"))]
-        )
-        async for echo_response in clients["echo"].send_message(echo_message):
-            pass  # Get final response
-        print(f"  ✓ Echo responded successfully!")
-        print()
-
-        # Step 3: Perform calculations
-        print("Step 3: Performing calculations with Calculator Agent...")
-        calculations = [
-            ("Revenue: 1250 * 12", "Multiply 1250 by 12"),
-            ("Tax: 15000 * 0.25", "Multiply 15000 by 0.25"),
-            ("Net: 15000 - 3750", "Subtract 3750 from 15000")
-        ]
-
-        for label, expr in calculations:
-            calc_message = Message(
-                messageId=str(uuid4()),
-                role="user",
-                parts=[Part(root=TextPart(text=expr))]
-            )
-            final_task = None
-            async for event in clients["calculator"].send_message(calc_message):
-                if isinstance(event, tuple):
-                    task, update = event
-                    final_task = task
-
-            # Extract result using helper function
-            result_text = extract_text_from_response((final_task, None)) if final_task else "N/A"
-            print(f"  {label} = {result_text}")
-        print()
-
-        # Step 4: Summary
-        print("Step 4: Workflow complete!")
-        print("  ✓ Connected to 2 agents via ClientFactory")
-        print("  ✓ Verified connectivity")
-        print("  ✓ Performed 3 calculations")
-        print()
-        print("═" * 60)
+    # Step 3: Summary
+    print("Step 3: Complete!")
+    print("  ✓ Verified connectivity with Echo Agent")
+    print("  ✓ Performed 3 calculations")
+    print()
+    print("═" * 60)
 
 asyncio.run(multi_agent_workflow())
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 6. A2A Client as a Tool (Agent Interoperability)
+# MAGIC ## 7. A2A Client as LangChain Tool
 # MAGIC
-# MAGIC This pattern shows how to wrap the A2A client as a LangChain tool, enabling an LLM-powered agent to call other A2A agents.
+# MAGIC Wrap the A2A client as a tool for LLM-powered orchestration.
 
 # COMMAND ----------
 
-# DBTITLE 1,A2A Client as LangChain Tool
+# DBTITLE 1,A2A Tool Pattern
 from langchain_core.tools import tool
 
 @tool
-async def call_a2a_agent(agent_url: str, message: str) -> str:
-    """Call any A2A-compliant agent and get a response.
+async def a2a_call(agent_url: str, message: str) -> str:
+    """Call any A2A-compliant agent.
 
     Args:
-        agent_url: The base URL of the A2A agent (e.g., https://agent.example.com)
-        message: The message to send to the agent
+        agent_url: The base URL of the A2A agent
+        message: The message to send
 
     Returns:
-        The agent's response as a string
+        The agent's response
     """
-    headers = AUTH_HEADERS
-
-    async with httpx.AsyncClient(timeout=60.0, headers=headers) as httpx_client:
-        # Resolve card and fix URL
-        resolver = A2ACardResolver(httpx_client=httpx_client, base_url=agent_url)
-        card = await resolver.get_agent_card(http_kwargs={"headers": headers})
-        if card.url and not card.url.startswith("http"):
-            card.url = agent_url.rstrip("/") + "/" + card.url.lstrip("/")
-
-        # Create client using ClientFactory
-        config = ClientConfig(httpx_client=httpx_client)
-        factory = ClientFactory(config=config)
-        client = factory.create(card=card)
-
-        # Create Message object (new SDK API)
-        msg = Message(
-            messageId=str(uuid4()),
-            role="user",
-            parts=[Part(root=TextPart(text=message))]
-        )
-
-        # Iterate through async iterator - collect final task
-        final_task = None
-        async for event in client.send_message(msg):
-            if isinstance(event, tuple):
-                task, update = event
-                final_task = task
-
-        # Extract text using helper function
-        if final_task:
-            return extract_text_from_response((final_task, None)) or json.dumps({"error": "No text response"})
-
-        return json.dumps({"error": "No response"})
+    result = await call_a2a_agent(agent_url, message, AUTH_HEADERS)
+    return result.get("text", "No response")
 
 # Test the tool
-print("Testing A2A Client as a LangChain tool:")
-result = asyncio.run(call_a2a_agent.ainvoke({
+print("Testing A2A tool pattern:")
+result = asyncio.run(a2a_call.ainvoke({
     "agent_url": CALC_AGENT_URL,
     "message": "Add 100 and 200"
 }))
@@ -609,24 +535,20 @@ print(f"Result: {result}")
 # MAGIC %md
 # MAGIC ## Summary
 # MAGIC
-# MAGIC This notebook demonstrated A2A interoperability using the official SDK:
+# MAGIC | Feature | Method | Description |
+# MAGIC |---------|--------|-------------|
+# MAGIC | Agent Discovery | `A2ACardResolver` | Fetch agent cards |
+# MAGIC | Send Message | `A2AClient.send_message()` | Sync/async messaging |
+# MAGIC | Task Status | `A2AClient.get_task()` | Get task by ID |
+# MAGIC | Streaming | SSE via `send_message()` | Real-time responses |
+# MAGIC | Gateway Proxy | `POST /api/agents/{name}` | UC-governed access |
 # MAGIC
-# MAGIC | Component | Class/Method | Purpose |
-# MAGIC |-----------|--------------|---------|
-# MAGIC | `A2ACardResolver` | Agent discovery | Fetch and parse agent cards |
-# MAGIC | `ClientFactory` | Client creation | Create clients with JSON-RPC transport |
-# MAGIC | `ClientConfig` | Configuration | Configure httpx client and streaming |
-# MAGIC | `SendMessageRequest` | Request format | Proper JSON-RPC structure |
-# MAGIC | `send_message()` | Sync call | Get complete response |
-# MAGIC | `send_message_streaming()` | SSE streaming | Real-time responses |
+# MAGIC ### Key Patterns
 # MAGIC
-# MAGIC ### Key Takeaways
-# MAGIC
-# MAGIC 1. **Use the A2A SDK** - Don't build raw HTTP calls; use `ClientFactory.connect()` for clients
-# MAGIC 2. **Agent cards are key** - They describe capabilities and enable discovery
-# MAGIC 3. **Interoperability** - Any A2A-compliant agent can communicate with any other
-# MAGIC 4. **Tool pattern** - Wrap A2A client as a tool for LLM-powered orchestration
-# MAGIC 5. **Gateway for governance** - Use the gateway for UC-based access control
+# MAGIC 1. **Direct A2A** - Use `call_a2a_agent()` for direct agent communication
+# MAGIC 2. **Gateway Proxy** - Use `call_agent_via_gateway()` for UC access control
+# MAGIC 3. **Task Lifecycle** - Tasks have states: submitted → working → completed
+# MAGIC 4. **Tool Pattern** - Wrap A2A client as LangChain tool for LLM orchestration
 
 # COMMAND ----------
 
