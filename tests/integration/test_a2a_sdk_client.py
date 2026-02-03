@@ -517,13 +517,15 @@ class TestMessageConstruction:
     def test_message_construction_pattern(self):
         """Verify the Message construction pattern used in notebook works."""
         # This is the exact pattern from the notebook
+        # Note: SDK accepts camelCase (messageId) but exposes snake_case (message_id)
         message = Message(
             messageId=str(uuid4()),
             role="user",
             parts=[Part(root=TextPart(text="Test message"))]
         )
 
-        assert message.messageId is not None
+        # SDK uses snake_case for Python attributes
+        assert message.message_id is not None
         assert message.role == "user"
         assert len(message.parts) == 1
 
