@@ -153,6 +153,13 @@ def build_echo_agent_app():
     from starlette.responses import JSONResponse
     from starlette.routing import Route
 
+    def get_base_url(request) -> str:
+        """Extract the base URL from the request for dynamic agent card URL."""
+        # Use X-Forwarded headers if behind a proxy, otherwise use request URL
+        proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+        host = request.headers.get("x-forwarded-host", request.url.netloc)
+        return f"{proto}://{host}"
+
     async def root(request):
         return JSONResponse({
             "name": agent_card.name,
@@ -161,12 +168,18 @@ def build_echo_agent_app():
             "agent_card": "/.well-known/agent.json"
         })
 
-    async def agent_card_alias(request):
-        """Alias for agent card (A2A SDK compatibility)."""
-        return JSONResponse(agent_card.model_dump(mode="json"))
+    async def dynamic_agent_card(request):
+        """Return agent card with dynamic URL based on request."""
+        base_url = get_base_url(request)
+        card_data = agent_card.model_dump(mode="json")
+        card_data["url"] = base_url  # Set full URL for SDK compatibility
+        return JSONResponse(card_data)
 
+    # Insert dynamic agent card endpoints BEFORE the default ones (position 0)
+    # This ensures our dynamic version takes precedence
     app.routes.insert(0, Route("/", root, methods=["GET"]))
-    app.routes.insert(1, Route("/.well-known/agent-card.json", agent_card_alias, methods=["GET"]))
+    app.routes.insert(1, Route("/.well-known/agent.json", dynamic_agent_card, methods=["GET"]))
+    app.routes.insert(2, Route("/.well-known/agent-card.json", dynamic_agent_card, methods=["GET"]))
 
     async def _close_httpx():
         await httpx_client.aclose()

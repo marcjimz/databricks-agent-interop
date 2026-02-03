@@ -2,11 +2,11 @@
 # MAGIC %md
 # MAGIC # A2A Protocol Demo Notebook
 # MAGIC
-# MAGIC This notebook demonstrates the **Agent-to-Agent (A2A) Protocol** using the official **A2A SDK Client**.
+# MAGIC This notebook demonstrates the **Agent-to-Agent (A2A) Protocol** using the official **A2A SDK**.
 # MAGIC
 # MAGIC **Features demonstrated:**
 # MAGIC 1. **Agent Discovery** - Resolve agent cards via `A2ACardResolver`
-# MAGIC 2. **A2A Client** - Send messages using `A2AClient`
+# MAGIC 2. **A2A Client** - Send messages using `ClientFactory.connect()`
 # MAGIC 3. **Task Lifecycle** - Get task status, cancel tasks
 # MAGIC 4. **Streaming** - Real-time SSE responses
 # MAGIC 5. **Multi-Agent Orchestration** - Call multiple agents
@@ -86,8 +86,8 @@ nest_asyncio.apply()
 from databricks.sdk import WorkspaceClient
 
 # A2A SDK imports
-from a2a.client import A2ACardResolver, A2AClient
-from a2a.types import Message, Part, TextPart, MessageSendParams
+from a2a.client import A2ACardResolver, ClientFactory, ClientConfig
+from a2a.types import Message, Part, TextPart, TaskQueryParams
 
 # Get configuration from widgets
 PREFIX = dbutils.widgets.get("prefix")
@@ -137,9 +137,11 @@ print(f"✅ Auth Token: Configured ({len(ACCESS_TOKEN)} chars)")
 # DBTITLE 1,Resolve Agent Cards
 async def resolve_agent_card(base_url: str, headers: dict = None):
     """Resolve an agent card using A2ACardResolver."""
+    # Headers are set on the httpx client - don't pass them again in http_kwargs
+    # as that can cause override/conflict issues with authentication
     async with httpx.AsyncClient(timeout=60.0, headers=headers) as client:
         resolver = A2ACardResolver(httpx_client=client, base_url=base_url)
-        card = await resolver.get_agent_card(http_kwargs={"headers": headers} if headers else None)
+        card = await resolver.get_agent_card()
         return card
 
 print("═" * 60)
@@ -171,19 +173,94 @@ for skill in calc_card.skills or []:
 # MAGIC %md
 # MAGIC ## 2. Send Messages with A2A Client
 # MAGIC
-# MAGIC Use `A2AClient` for direct communication with A2A agents.
+# MAGIC Use `ClientFactory.connect()` to create a client for direct communication with A2A agents.
 
 # COMMAND ----------
 
 # DBTITLE 1,A2A Client Helper
 def extract_text_from_task(task) -> str:
     """Extract text from A2A Task response."""
-    if task and task.artifacts:
-        for artifact in task.artifacts:
-            for part in artifact.parts:
+    if not task:
+        return ""
+
+    # Handle task with artifacts
+    artifacts = getattr(task, 'artifacts', None)
+    if artifacts:
+        for artifact in artifacts:
+            parts = getattr(artifact, 'parts', [])
+            for part in parts:
+                # Handle Part with root containing TextPart
                 if hasattr(part, 'root') and hasattr(part.root, 'text'):
                     return part.root.text
+                # Handle direct TextPart
+                if hasattr(part, 'text'):
+                    return part.text
     return ""
+
+
+def extract_task_from_event(event) -> tuple:
+    """Extract task from client event or response.
+
+    The SDK returns AsyncIterator[ClientEvent | Message] where:
+    - ClientEvent = tuple[Task, UpdateEvent]
+    - UpdateEvent = TaskStatusUpdateEvent | TaskArtifactUpdateEvent | None
+
+    Returns:
+        Tuple of (task, task_id, state_value)
+    """
+    task = None
+    task_id = None
+    state_value = None
+
+    # Handle ClientEvent tuple: (Task, UpdateEvent)
+    if isinstance(event, tuple) and len(event) >= 1:
+        task = event[0]  # First element is the Task
+        if task:
+            task_id = getattr(task, 'id', None)
+            status = getattr(task, 'status', None)
+            if status:
+                state = getattr(status, 'state', None)
+                if state:
+                    state_value = state.value if hasattr(state, 'value') else str(state)
+        return task, task_id, state_value
+
+    # Handle Task directly (has id and status attributes)
+    if hasattr(event, 'id') and hasattr(event, 'status'):
+        task = event
+        task_id = event.id
+        status = getattr(event, 'status', None)
+        if status:
+            state = getattr(status, 'state', None)
+            if state:
+                state_value = state.value if hasattr(state, 'value') else str(state)
+        return task, task_id, state_value
+
+    # Handle Message objects (from SDK response)
+    if hasattr(event, 'messageId') or hasattr(event, 'role'):
+        # This is a Message, not a Task - skip it
+        return None, None, None
+
+    # Handle wrapped responses (e.g., SendMessageResponse)
+    if hasattr(event, 'root'):
+        root = event.root
+        if hasattr(root, 'result'):
+            task = root.result
+            task_id = getattr(task, 'id', None) if task else None
+            if task:
+                status = getattr(task, 'status', None)
+                if status:
+                    state = getattr(status, 'state', None)
+                    if state:
+                        state_value = state.value if hasattr(state, 'value') else str(state)
+        return task, task_id, state_value
+
+    # Handle dict-like responses
+    if isinstance(event, dict):
+        if 'result' in event:
+            task = event['result']
+            task_id = task.get('id') if isinstance(task, dict) else getattr(task, 'id', None)
+
+    return task, task_id, state_value
 
 
 async def call_a2a_agent(base_url: str, message_text: str, headers: dict = None) -> dict:
@@ -199,38 +276,41 @@ async def call_a2a_agent(base_url: str, message_text: str, headers: dict = None)
     Returns:
         Dict with 'text' (response), 'task_id', and 'task_state'
     """
-    async with httpx.AsyncClient(timeout=60.0, headers=headers) as httpx_client:
-        # Resolve agent card
-        resolver = A2ACardResolver(httpx_client=httpx_client, base_url=base_url)
-        card = await resolver.get_agent_card(http_kwargs={"headers": headers} if headers else None)
+    # Create httpx client with auth headers
+    httpx_client = httpx.AsyncClient(timeout=60.0, headers=headers)
 
-        # Fix relative URL
-        if card.url and not card.url.startswith("http"):
-            card.url = base_url.rstrip("/") + "/" + card.url.lstrip("/")
+    # Use ClientFactory.connect() for modern API (avoids deprecation warning)
+    config = ClientConfig(httpx_client=httpx_client)
+    client = await ClientFactory.connect(base_url, client_config=config)
 
-        # Create A2A client
-        client = A2AClient(httpx_client=httpx_client, agent_card=card)
+    # Create message - new API takes Message directly
+    message = Message(
+        messageId=str(uuid4()),
+        role="user",
+        parts=[Part(root=TextPart(text=message_text))]
+    )
 
-        # Create message
-        message = Message(
-            messageId=str(uuid4()),
-            role="user",
-            parts=[Part(root=TextPart(text=message_text))]
-        )
+    # Send message - returns async generator of ClientEvent | Message
+    task = None
+    task_id = None
+    state_value = None
 
-        # Send message and collect response
-        final_task = None
-        async for event in client.send_message(MessageSendParams(message=message)):
-            if isinstance(event, tuple):
-                task, _ = event
-                final_task = task
+    async for event in client.send_message(message):
+        # Extract task from each event
+        t, tid, sv = extract_task_from_event(event)
+        if t:
+            task = t
+        if tid:
+            task_id = tid
+        if sv:
+            state_value = sv
 
-        return {
-            "text": extract_text_from_task(final_task) if final_task else "",
-            "task_id": final_task.id if final_task else None,
-            "task_state": final_task.status.state.value if final_task and final_task.status else None,
-            "task": final_task
-        }
+    return {
+        "text": extract_text_from_task(task) if task else "",
+        "task_id": task_id,
+        "task_state": state_value,
+        "task": task
+    }
 
 # COMMAND ----------
 
@@ -280,54 +360,63 @@ async def demo_task_lifecycle():
     print("A2A TASK LIFECYCLE DEMO")
     print("═" * 60)
 
-    async with httpx.AsyncClient(timeout=60.0, headers=AUTH_HEADERS) as httpx_client:
-        # Resolve agent card
-        resolver = A2ACardResolver(httpx_client=httpx_client, base_url=CALC_AGENT_URL)
-        card = await resolver.get_agent_card(http_kwargs={"headers": AUTH_HEADERS})
+    # Create client using ClientFactory
+    httpx_client = httpx.AsyncClient(timeout=60.0, headers=AUTH_HEADERS)
+    config = ClientConfig(httpx_client=httpx_client)
+    client = await ClientFactory.connect(CALC_AGENT_URL, client_config=config)
 
-        if card.url and not card.url.startswith("http"):
-            card.url = CALC_AGENT_URL.rstrip("/") + "/" + card.url.lstrip("/")
+    # Step 1: Send a message
+    print("\n1. Sending message...")
+    message = Message(
+        messageId=str(uuid4()),
+        role="user",
+        parts=[Part(root=TextPart(text="Multiply 123 by 456"))]
+    )
 
-        client = A2AClient(httpx_client=httpx_client, agent_card=card)
+    # Iterate over async generator to get final task
+    task = None
+    task_id = None
+    state_value = None
 
-        # Step 1: Send a message
-        print("\n1. Sending message...")
-        message = Message(
-            messageId=str(uuid4()),
-            role="user",
-            parts=[Part(root=TextPart(text="Multiply 123 by 456"))]
-        )
+    async for event in client.send_message(message):
+        t, tid, sv = extract_task_from_event(event)
+        if t:
+            task = t
+        if tid:
+            task_id = tid
+        if sv:
+            state_value = sv
 
-        task_id = None
-        final_task = None
-        async for event in client.send_message(MessageSendParams(message=message)):
-            if isinstance(event, tuple):
-                task, update = event
-                task_id = task.id
-                final_task = task
-                print(f"   Task ID: {task_id}")
-                print(f"   State: {task.status.state.value if task.status else 'unknown'}")
+    if task:
+        print(f"   Task ID: {task_id}")
+        print(f"   State: {state_value or 'unknown'}")
 
-        # Step 2: Get task status (if task completed quickly, this shows final state)
-        if task_id:
-            print("\n2. Getting task status...")
-            try:
-                task_status = await client.get_task(task_id)
-                print(f"   Task ID: {task_status.id}")
-                print(f"   State: {task_status.status.state.value if task_status.status else 'unknown'}")
-                if task_status.artifacts:
+    # Step 2: Get task status (demonstrates tasks/get)
+    if task_id:
+        print("\n2. Getting task status...")
+        try:
+            params = TaskQueryParams(id=task_id)
+            task_status = await client.get_task(params)
+            if task_status:
+                status_id = getattr(task_status, 'id', task_id)
+                status_state = 'unknown'
+                if hasattr(task_status, 'status') and task_status.status:
+                    status_state = task_status.status.state.value if hasattr(task_status.status.state, 'value') else str(task_status.status.state)
+                print(f"   Task ID: {status_id}")
+                print(f"   State: {status_state}")
+                if hasattr(task_status, 'artifacts') and task_status.artifacts:
                     result = extract_text_from_task(task_status)
                     print(f"   Result: {result}")
-            except Exception as e:
-                print(f"   Status check: {e}")
+        except Exception as e:
+            print(f"   Status check: {e}")
 
-        # Step 3: Show final result
-        print("\n3. Final result:")
-        if final_task:
-            result = extract_text_from_task(final_task)
-            print(f"   {result}")
+    # Step 3: Show final result
+    print("\n3. Final result:")
+    if task:
+        result = extract_text_from_task(task)
+        print(f"   {result}")
 
-        print("\n" + "═" * 60)
+    print("\n" + "═" * 60)
 
 asyncio.run(demo_task_lifecycle())
 
@@ -342,36 +431,37 @@ asyncio.run(demo_task_lifecycle())
 
 # DBTITLE 1,Streaming Demo
 async def stream_a2a_message(base_url: str, text: str, headers: dict = None):
-    """Stream a message response from an A2A agent."""
-    async with httpx.AsyncClient(timeout=60.0, headers=headers) as httpx_client:
-        resolver = A2ACardResolver(httpx_client=httpx_client, base_url=base_url)
-        card = await resolver.get_agent_card(http_kwargs={"headers": headers} if headers else None)
+    """Stream a message response from an A2A agent.
 
-        if card.url and not card.url.startswith("http"):
-            card.url = base_url.rstrip("/") + "/" + card.url.lstrip("/")
+    Note: The SDK's send_message() already returns an async iterator (streaming).
+    There's no separate send_message_streaming method.
+    """
+    # Create client using ClientFactory
+    httpx_client = httpx.AsyncClient(timeout=60.0, headers=headers)
+    config = ClientConfig(httpx_client=httpx_client)
+    client = await ClientFactory.connect(base_url, client_config=config)
 
-        client = A2AClient(httpx_client=httpx_client, agent_card=card)
+    message = Message(
+        messageId=str(uuid4()),
+        role="user",
+        parts=[Part(root=TextPart(text=text))]
+    )
 
-        message = Message(
-            messageId=str(uuid4()),
-            role="user",
-            parts=[Part(root=TextPart(text=text))]
-        )
+    print("Streaming response:")
+    print("-" * 40)
 
-        print("Streaming response:")
-        print("-" * 40)
+    # send_message returns AsyncIterator[ClientEvent | Message] - it's already streaming
+    # ClientEvent = tuple[Task, UpdateEvent]
+    async for event in client.send_message(message):
+        task, task_id, state_value = extract_task_from_event(event)
+        if state_value:
+            print(f"Task state: {state_value}")
+        if task:
+            text_result = extract_text_from_task(task)
+            if text_result:
+                print(f"Result: {text_result}")
 
-        async for event in client.send_message(MessageSendParams(message=message)):
-            if isinstance(event, tuple):
-                task, update = event
-                state = task.status.state.value if task.status else "unknown"
-                print(f"Task state: {state}")
-                if task.artifacts:
-                    result = extract_text_from_task(task)
-                    if result:
-                        print(f"Result: {result}")
-
-        print("-" * 40)
+    print("-" * 40)
 
 print("Testing streaming with Calculator Agent:\n")
 asyncio.run(stream_a2a_message(CALC_AGENT_URL, "What is 999 plus 1?", AUTH_HEADERS))
@@ -537,18 +627,18 @@ print(f"Result: {result}")
 # MAGIC
 # MAGIC | Feature | Method | Description |
 # MAGIC |---------|--------|-------------|
-# MAGIC | Agent Discovery | `A2ACardResolver` | Fetch agent cards |
-# MAGIC | Send Message | `A2AClient.send_message()` | Sync/async messaging |
-# MAGIC | Task Status | `A2AClient.get_task()` | Get task by ID |
-# MAGIC | Streaming | SSE via `send_message()` | Real-time responses |
+# MAGIC | Client Creation | `ClientFactory.connect()` | Create client from agent URL |
+# MAGIC | Send Message | `async for event in client.send_message()` | Returns `AsyncIterator[tuple[Task, UpdateEvent]]` |
+# MAGIC | Task Status | `client.get_task()` | Get task by ID |
 # MAGIC | Gateway Proxy | `POST /api/agents/{name}` | UC-governed access |
 # MAGIC
 # MAGIC ### Key Patterns
 # MAGIC
-# MAGIC 1. **Direct A2A** - Use `call_a2a_agent()` for direct agent communication
+# MAGIC 1. **Direct A2A** - Use `ClientFactory.connect()` + `call_a2a_agent()` for direct agent communication
 # MAGIC 2. **Gateway Proxy** - Use `call_agent_via_gateway()` for UC access control
 # MAGIC 3. **Task Lifecycle** - Tasks have states: submitted → working → completed
 # MAGIC 4. **Tool Pattern** - Wrap A2A client as LangChain tool for LLM orchestration
+# MAGIC 5. **Event Format** - `send_message()` yields `tuple[Task, UpdateEvent]` - extract task with `event[0]`
 
 # COMMAND ----------
 
