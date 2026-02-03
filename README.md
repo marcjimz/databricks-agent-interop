@@ -87,6 +87,26 @@ curl -X POST "${GATEWAY_URL}/api/agents/marcin-calculator" \
 
 The gateway proxies all JSON-RPC requests to the downstream agent while enforcing Unity Catalog access control.
 
+## Key Concepts
+
+**Discovery Standard**:
+- UC HTTP connection name ends with `-a2a` → agent is discoverable
+- Connection options:
+  - `host` = agent base URL (e.g., `https://agent.com`)
+  - `base_path` = agent card path (e.g., `/.well-known/agent.json`)
+- Gateway fetches the agent card from `host` + `base_path` and uses the `url` field for messaging
+
+**Authorization**: Uses Databricks OBO (On-Behalf-Of) to check if the calling user/principal can access the UC connection.
+
+**Authentication to Downstream Agents** (aligned with [A2A OAuth support](https://google.github.io/A2A/)):
+| Scenario | Connection Options | Auth Method |
+|----------|-------------------|-------------|
+| Same Azure tenant | `bearer_token: "databricks"` | Gateway passes caller's Entra ID token |
+| External (static token) | `bearer_token: "<token>"` | Gateway uses stored token |
+| External (OAuth M2M) | `client_id`, `client_secret`, `token_endpoint` | Gateway acquires token via client credentials flow |
+
+**Interoperability**: Any A2A-compliant agent can be registered (ServiceNow, Workday, custom). The gateway fetches the agent card and proxies to the endpoint URL specified in the card.
+
 ## Quick Start
 
 **Prerequisites:** Databricks CLI configured, `make`
@@ -96,6 +116,15 @@ PREFIX=yourname
 make deploy PREFIX=$PREFIX
 make status
 ```
+
+**Run the Demo Notebook:**
+
+After deployment, open your Databricks workspace and navigate to:
+```
+/Workspace/Users/<your-email>/.bundle/a2a-gateway/dev/files/notebooks/a2a_demo.py
+```
+
+This notebook demonstrates agent discovery, messaging, and streaming using the A2A SDK.
 
 ## Register Agents
 
@@ -331,26 +360,6 @@ result = await call_calculator("Add 42 and 17")
 
 The gateway enforces the same UC connection access for agent-to-agent calls - the calling agent's service principal must have `USE CONNECTION` privilege.
 
-## Key Concepts
-
-**Discovery Standard**:
-- UC HTTP connection name ends with `-a2a` → agent is discoverable
-- Connection options:
-  - `host` = agent base URL (e.g., `https://agent.com`)
-  - `base_path` = agent card path (e.g., `/.well-known/agent.json`)
-- Gateway fetches the agent card from `host` + `base_path` and uses the `url` field for messaging
-
-**Authorization**: Uses Databricks OBO (On-Behalf-Of) to check if the calling user/principal can access the UC connection.
-
-**Authentication to Downstream Agents** (aligned with [A2A OAuth support](https://google.github.io/A2A/)):
-| Scenario | Connection Options | Auth Method |
-|----------|-------------------|-------------|
-| Same Azure tenant | `bearer_token: "databricks"` | Gateway passes caller's Entra ID token |
-| External (static token) | `bearer_token: "<token>"` | Gateway uses stored token |
-| External (OAuth M2M) | `client_id`, `client_secret`, `token_endpoint` | Gateway acquires token via client credentials flow |
-
-**Interoperability**: Any A2A-compliant agent can be registered (ServiceNow, Workday, custom). The gateway fetches the agent card and proxies to the endpoint URL specified in the card.
-
 ## Commands
 
 | Command | Description |
@@ -455,9 +464,4 @@ See [tests/README.md](tests/README.md) for details.
 | 1 | OAuth token manual passthrough required for OBO auth from Databricks notebooks to Databricks Apps | Tracked internally |
 | 2 | Enable agent discovery without requiring `-a2a` suffix on connection names | Open (non-blocking) |
 | 3 | Fix swagger documentation to support OAuth token injection from the UI via OBO | Open (non-blocking) |
-
-## Roadmap
-
-- [ ] MCP integration for model serving
-- [ ] MLflow Tracing integration
-- [ ] Additional auth flows (app identity passthrough)
+| 4 | Move standardized functions for agent discovery and usage to UC functions with Agent Framework and OBO | Open (non-blocking) |
