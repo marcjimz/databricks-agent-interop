@@ -13,6 +13,14 @@ from models import AgentInfo, OAuthM2MCredentials
 
 logger = logging.getLogger(__name__)
 
+# Import mlflow for tracing (optional - gracefully handle if not available)
+try:
+    import mlflow
+    MLFLOW_AVAILABLE = True
+except ImportError:
+    MLFLOW_AVAILABLE = False
+    mlflow = None
+
 
 class ProxyService:
     """Handles proxying requests to downstream A2A agents."""
@@ -55,13 +63,28 @@ class ProxyService:
 
         try:
             headers = await self.build_proxy_headers(agent, request)
-            response = await self.http_client.get(
-                agent.agent_card_url,
-                headers=headers,
-                follow_redirects=False
-            )
-            response.raise_for_status()
-            card = response.json()
+
+            # Trace the HTTP call
+            if MLFLOW_AVAILABLE:
+                with mlflow.start_span(name="fetch_agent_card", span_type="HTTP") as span:
+                    span.set_inputs({"url": agent.agent_card_url, "agent": agent.name})
+                    response = await self.http_client.get(
+                        agent.agent_card_url,
+                        headers=headers,
+                        follow_redirects=False
+                    )
+                    response.raise_for_status()
+                    card = response.json()
+                    span.set_outputs({"status_code": response.status_code, "card_keys": list(card.keys())})
+            else:
+                response = await self.http_client.get(
+                    agent.agent_card_url,
+                    headers=headers,
+                    follow_redirects=False
+                )
+                response.raise_for_status()
+                card = response.json()
+
             self._agent_card_cache[agent.agent_card_url] = card
             logger.info(f"Fetched agent card from {agent.agent_card_url}")
             return card
@@ -124,13 +147,30 @@ class ProxyService:
             if oauth_m2m.oauth_scope:
                 data["scope"] = oauth_m2m.oauth_scope
 
-            response = await self.http_client.post(
-                oauth_m2m.token_endpoint,
-                data=data,
-                headers={"Content-Type": "application/x-www-form-urlencoded"}
-            )
-            response.raise_for_status()
-            token_data = response.json()
+            # Trace OAuth token acquisition
+            if MLFLOW_AVAILABLE:
+                with mlflow.start_span(name="acquire_oauth_token", span_type="HTTP") as span:
+                    span.set_inputs({
+                        "token_endpoint": oauth_m2m.token_endpoint,
+                        "client_id": oauth_m2m.client_id,
+                        "scope": oauth_m2m.oauth_scope
+                    })
+                    response = await self.http_client.post(
+                        oauth_m2m.token_endpoint,
+                        data=data,
+                        headers={"Content-Type": "application/x-www-form-urlencoded"}
+                    )
+                    response.raise_for_status()
+                    token_data = response.json()
+                    span.set_outputs({"status_code": response.status_code, "token_acquired": True})
+            else:
+                response = await self.http_client.post(
+                    oauth_m2m.token_endpoint,
+                    data=data,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"}
+                )
+                response.raise_for_status()
+                token_data = response.json()
 
             access_token = token_data.get("access_token")
             expires_in = token_data.get("expires_in", 3600)
@@ -228,11 +268,30 @@ class ProxyService:
         headers = await self.build_proxy_headers(agent, request, content_type)
 
         try:
-            response = await self.http_client.post(
-                agent_url,
-                content=body,
-                headers=headers
-            )
+            # Trace the HTTP call to the agent
+            if MLFLOW_AVAILABLE:
+                with mlflow.start_span(name="http_post_agent", span_type="HTTP") as span:
+                    span.set_inputs({
+                        "url": agent_url,
+                        "agent": agent.name,
+                        "method": "POST",
+                        "content_type": content_type
+                    })
+                    response = await self.http_client.post(
+                        agent_url,
+                        content=body,
+                        headers=headers
+                    )
+                    span.set_outputs({
+                        "status_code": response.status_code,
+                        "content_length": len(response.content) if response.content else 0
+                    })
+            else:
+                response = await self.http_client.post(
+                    agent_url,
+                    content=body,
+                    headers=headers
+                )
             return response
         except httpx.HTTPError as e:
             logger.error(f"Failed to send message to {agent_url}: {e}")

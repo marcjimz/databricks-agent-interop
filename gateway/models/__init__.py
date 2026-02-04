@@ -11,6 +11,13 @@ from .responses import (
     A2AMessageParams,
     TextPart,
 )
+from .trace import (
+    GatewayTags,
+    UserTags,
+    AgentTags,
+    RequestTags,
+    TraceTags,
+)
 
 __all__ = [
     "AgentInfo",
@@ -23,4 +30,10 @@ __all__ = [
     "A2AMessage",
     "A2AMessageParams",
     "TextPart",
+    # Trace models
+    "GatewayTags",
+    "UserTags",
+    "AgentTags",
+    "RequestTags",
+    "TraceTags",
 ]

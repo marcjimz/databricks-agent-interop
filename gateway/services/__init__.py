@@ -1,4 +1,4 @@
-"""Gateway services for discovery, authorization, and proxying."""
+"""Gateway services for discovery, authorization, proxying, and tracing."""
 
 from .discovery import (
     AgentDiscovery,
@@ -9,6 +9,14 @@ from .discovery import (
 )
 from .authorization import AuthService, get_auth_service
 from .proxy import ProxyService, get_proxy_service
+from .tracing import (
+    TracingConfig,
+    TracingConfigurationError,
+    GatewayTracer,
+    configure_tracing_once,
+    get_tracer,
+    reset_tracer,
+)
 
 __all__ = [
     "AgentDiscovery",
@@ -20,4 +28,11 @@ __all__ = [
     "get_auth_service",
     "ProxyService",
     "get_proxy_service",
+    # Tracing (Experimental)
+    "TracingConfig",
+    "TracingConfigurationError",
+    "GatewayTracer",
+    "configure_tracing_once",
+    "get_tracer",
+    "reset_tracer",
 ]

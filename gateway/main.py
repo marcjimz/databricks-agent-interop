@@ -18,6 +18,7 @@ from fastapi.openapi.utils import get_openapi
 
 from config import settings
 from services import get_proxy_service
+from services.tracing import TracingConfig, configure_tracing_once
 from routes import health_router, agents_router
 
 # Configure logging
@@ -32,6 +33,18 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """Application lifespan manager."""
     logger.info(f"Starting {settings.app_name} v{settings.app_version}")
+
+    # Configure MLflow tracing (Experimental)
+    tracing_config = TracingConfig.from_env()
+    if tracing_config.enabled:
+        logger.info("Configuring MLflow tracing...")
+        configure_tracing_once(tracing_config)
+        logger.info(
+            f"MLflow tracing enabled: experiment={tracing_config.experiment_name}, "
+            f"uc_schema={tracing_config.uc_schema or 'none'}"
+        )
+    else:
+        logger.info("MLflow tracing is disabled")
 
     yield
 

@@ -5,18 +5,41 @@ variables:
   name_prefix:
     description: "Prefix for all resource names"
     default: "marcin"
-  catalog_name:
-    description: "Unity Catalog catalog name"
+  trace_catalog:
+    description: "Existing Unity Catalog for trace storage (must already exist)"
     default: "marcin_demo"
-  schema_name:
-    description: "Schema for A2A connections"
-    default: "a2a_demo"
 
 sync:
   include:
     - notebooks/*
 
 resources:
+  # MLflow experiment for viewing traces in the UI
+  experiments:
+    a2a_gateway_traces:
+      name: "/Shared/a2a-gateway-traces"
+      permissions:
+        - service_principal_name: "${resources.apps.a2a_gateway.service_principal_client_id}"
+          level: CAN_MANAGE
+
+  # Unity Catalog schema for trace storage
+  # NOTE: The catalog must already exist. Set trace_catalog variable to specify which catalog to use.
+  # After deployment, grant USE_CATALOG to the app's service principal:
+  #   SP_ID=$(databricks apps get ${var.name_prefix}-a2a-gateway --output json | jq -r '.service_principal_client_id')
+  #   databricks grants update catalog ${var.trace_catalog} --json "{\"changes\":[{\"add\":[\"USE_CATALOG\"],\"principal\":\"${SP_ID}\"}]}"
+  schemas:
+    gateway_schema:
+      name: "a2a_gateway"
+      catalog_name: "${var.trace_catalog}"
+      comment: "Schema for A2A Gateway traces and metadata"
+      grants:
+        - principal: "${resources.apps.a2a_gateway.service_principal_client_id}"
+          privileges:
+            - USE_SCHEMA
+            - CREATE_TABLE
+            - SELECT
+            - MODIFY
+
   apps:
     a2a_gateway:
       name: "${var.name_prefix}-a2a-gateway"
@@ -42,6 +65,4 @@ resources:
 targets:
   dev:
     default: true
-    presets:
-      name_prefix: "${var.name_prefix}-"
     # Uses default CLI profile. Override with: databricks bundle deploy -p <profile>

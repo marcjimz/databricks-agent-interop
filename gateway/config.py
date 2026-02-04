@@ -26,6 +26,14 @@ class Settings(BaseSettings):
     # A2A Connection suffix for discovery
     a2a_connection_suffix: str = "-a2a"
 
+    # Tracing (Experimental)
+    tracing_enabled: bool = False
+    mlflow_experiment_name: str = "/Shared/a2a-gateway-traces"
+    trace_uc_schema: str | None = None  # e.g., "catalog.schema" for Delta table storage
+    trace_sql_warehouse_id: str | None = None  # SQL warehouse for monitoring queries
+    gateway_environment: str = "dev"
+    gateway_instance_id: str | None = None  # Auto-generated if not provided
+
     class Config:
         env_prefix = ""
         case_sensitive = False

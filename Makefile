@@ -1,11 +1,15 @@
 PREFIX ?= marcin
 BUNDLE_PATH ?= /Workspace/Users/marcin.jimenez@databricks.com/.bundle/a2a-gateway/dev/files
+TRACE_CATALOG ?= marcin_demo
 
 auth:
 	databricks auth login
 
 deploy:
 	databricks bundle deploy
+	@echo "Granting USE_CATALOG on $(TRACE_CATALOG) to gateway service principal..."
+	@SP_ID=$$(databricks apps get $(PREFIX)-a2a-gateway --output json 2>/dev/null | jq -r '.service_principal_client_id') && \
+		databricks grants update catalog $(TRACE_CATALOG) --json "{\"changes\":[{\"add\":[\"USE_CATALOG\"],\"principal\":\"$$SP_ID\"}]}" >/dev/null 2>&1 || true
 	@echo "Deploying apps..."
 	@databricks apps deploy $(PREFIX)-a2a-gateway --source-code-path $(BUNDLE_PATH)/gateway --no-wait >/dev/null 2>&1 || true
 	@databricks apps deploy $(PREFIX)-echo-agent --source-code-path $(BUNDLE_PATH)/src/agents/echo --no-wait >/dev/null 2>&1 || true

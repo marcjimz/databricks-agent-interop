@@ -18,6 +18,7 @@ from services import (
     extract_user_email_from_request,
     AccessDeniedException,
 )
+from services.tracing import get_tracer
 
 logger = logging.getLogger(__name__)
 
@@ -50,11 +51,21 @@ async def list_agents(request: Request):
     """
     auth_token = extract_token_from_request(request)
     user_email = extract_user_email_from_request(request)
+    tracer = get_tracer()
 
     logger.info(f"list_agents: auth_token present={auth_token is not None}, user_email={user_email}")
 
-    discovery = get_discovery(auth_token=auth_token, user_email=user_email)
-    agents = discovery.discover_agents()
+    with tracer.trace_request(
+        request_type="gateway",
+        headers=dict(request.headers),
+        span_name="gateway.list_agents"
+    ) as span:
+        discovery = get_discovery(auth_token=auth_token, user_email=user_email)
+        agents = discovery.discover_agents()
+
+        # Record output
+        if span:
+            span.set_outputs({"agent_count": len(agents), "agents": [a.name for a in agents]})
 
     return AgentListResponse(agents=agents, total=len(agents))
 
@@ -90,6 +101,7 @@ async def stream_message(agent_name: str, request: Request, body: A2AJsonRpcRequ
     user_email = extract_user_email_from_request(request)
     discovery = get_discovery(auth_token=auth_token, user_email=user_email)
     proxy_service = get_proxy_service()
+    tracer = get_tracer()
 
     agent = _get_agent_or_raise(discovery, agent_name)
 
@@ -97,6 +109,30 @@ async def stream_message(agent_name: str, request: Request, body: A2AJsonRpcRequ
         raw_body = json.dumps(body.model_dump()).encode()
     else:
         raw_body = await request.body()
+
+    # Build agent tags for tracing
+    agent_tags = tracer.build_agent_tags(
+        name=agent.name,
+        connection_id=agent.connection_name,
+        url=agent.url,
+        method="message_stream"
+    )
+
+    # Note: For streaming, we trace the start but the span completes
+    # before the stream finishes. This is a limitation of the current design.
+    with tracer.trace_request(
+        request_type="agent_proxy",
+        headers=dict(request.headers),
+        agent_tags=agent_tags
+    ) as span:
+        # Record input for streaming request
+        if span:
+            try:
+                import json as json_module
+                span.set_inputs({"request": json_module.loads(raw_body.decode()), "streaming": True})
+            except Exception:
+                span.set_inputs({"request": raw_body.decode()[:1000], "streaming": True})
+            span.set_outputs({"note": "Streaming response - output captured in stream"})
 
     return StreamingResponse(
         proxy_service.stream_message(agent, request, raw_body),
@@ -122,6 +158,7 @@ async def rpc_endpoint(agent_name: str, request: Request, body: A2AJsonRpcReques
     user_email = extract_user_email_from_request(request)
     discovery = get_discovery(auth_token=auth_token, user_email=user_email)
     proxy_service = get_proxy_service()
+    tracer = get_tracer()
 
     agent = _get_agent_or_raise(discovery, agent_name)
 
@@ -130,9 +167,43 @@ async def rpc_endpoint(agent_name: str, request: Request, body: A2AJsonRpcReques
     else:
         raw_body = await request.body()
 
+    # Determine A2A method from body
+    method = "send_message"
+    if body and body.method:
+        method = body.method.replace("/", "_").replace("message_send", "send_message")
+
+    # Build agent tags for tracing
+    agent_tags = tracer.build_agent_tags(
+        name=agent.name,
+        connection_id=agent.connection_name,
+        url=agent.url,
+        method=method
+    )
+
     content_type = request.headers.get("content-type", "application/json")
 
-    response = await proxy_service.send_message(agent, request, raw_body, content_type)
+    # Trace the agent proxy call with inputs/outputs
+    with tracer.trace_request(
+        request_type="agent_proxy",
+        headers=dict(request.headers),
+        agent_tags=agent_tags
+    ) as span:
+        # Record input
+        if span:
+            try:
+                import json as json_module
+                span.set_inputs({"request": json_module.loads(raw_body.decode())})
+            except Exception:
+                span.set_inputs({"request": raw_body.decode()[:1000]})
+
+        response = await proxy_service.send_message(agent, request, raw_body, content_type)
+
+        # Record output
+        if span:
+            try:
+                span.set_outputs({"response": response.json(), "status_code": response.status_code})
+            except Exception:
+                span.set_outputs({"response": response.text[:1000], "status_code": response.status_code})
 
     try:
         content = response.json()
