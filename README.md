@@ -457,6 +457,46 @@ make test PREFIX=$PREFIX
 
 See [tests/README.md](tests/README.md) for details.
 
+## Experimental Features
+
+### MLflow Tracing (Unity Catalog)
+
+Trace all gateway requests with rich metadata including agent, user, and gateway context. Traces are stored in Unity Catalog Delta tables for analysis and monitoring.
+
+**Configuration** (`gateway/app.yaml`):
+```yaml
+env:
+  - name: TRACING_ENABLED
+    value: "true"
+  - name: MLFLOW_EXPERIMENT_NAME
+    value: "/Shared/a2a-gateway-traces"
+  - name: TRACE_UC_SCHEMA
+    value: "a2a.gateway"
+```
+
+**Required Setup** (handled automatically by DAB):
+1. MLflow experiment `/Shared/a2a-gateway-traces` with app service principal permissions
+2. Unity Catalog `a2a` with `USE_CATALOG` grant
+3. Schema `a2a.gateway` with `USE_SCHEMA`, `CREATE_TABLE`, `SELECT`, `MODIFY` grants
+
+The experiment must exist before the app starts (app will fail fast if not found).
+
+**Trace Tags**:
+| Tag | Description |
+|-----|-------------|
+| `gateway.version` | Gateway version |
+| `gateway.environment` | Environment (dev/staging/prod) |
+| `gateway.instance_id` | Unique gateway instance ID |
+| `request.id` | Unique request correlation ID |
+| `request.type` | Request type (gateway/agent_proxy) |
+| `user.email` | Caller's email (from OBO headers) |
+| `agent.name` | Target agent name |
+| `agent.method` | A2A method called |
+
+**Optional**: Set `MLFLOW_TRACING_SQL_WAREHOUSE_ID` for production monitoring queries.
+
+**Reference**: [Databricks MLflow Tracing with Unity Catalog](https://docs.databricks.com/aws/en/mlflow3/genai/tracing/trace-unity-catalog)
+
 ## Known Issues
 
 | # | Issue | Status |
@@ -465,3 +505,4 @@ See [tests/README.md](tests/README.md) for details.
 | 2 | Enable agent discovery without requiring `-a2a` suffix on connection names | Open (non-blocking) |
 | 3 | Fix swagger documentation to support OAuth token injection from the UI via OBO | Open (non-blocking) |
 | 4 | Move standardized functions for agent discovery and usage to UC functions with Agent Framework and OBO | Open (non-blocking) |
+| 5 | Streamline configuration: consolidate duplicate settings across `app.yaml`, `databricks.yml`, and `Makefile` (catalog names, schema names, prefixes) into a single source of truth | TODO |
