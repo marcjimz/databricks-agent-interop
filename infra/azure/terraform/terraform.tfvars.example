@@ -1,0 +1,38 @@
+# -----------------------------------------------------------------------------
+# Example Terraform Variables
+#
+# Copy this file to terraform.tfvars and fill in your values:
+#   cp terraform.tfvars.example terraform.tfvars
+#
+# NOTE: If using deploy.sh, you don't need this file - all variables are
+# auto-detected. Just select your subscription first:
+#   az account set --subscription "Your Subscription Name"
+#   ./deploy.sh
+# -----------------------------------------------------------------------------
+
+# Resource name prefix (should match your Databricks PREFIX)
+prefix = "marcin"
+
+# Azure region
+location = "eastus"
+
+# Databricks A2A Gateway URL
+# Get this with: databricks apps get ${PREFIX}-a2a-gateway --output json | jq -r '.url'
+databricks_gateway_url = "https://marcin-a2a-gateway.databricksapps.com"
+
+# Entra ID tenant ID (must be same tenant as Databricks)
+# Get this with: az account show --query tenantId -o tsv
+tenant_id = "your-tenant-id-here"
+
+# Model deployment configuration
+model_deployment_name = "gpt-4o"
+model_name            = "gpt-4o"
+model_version         = "2024-08-06"
+
+# Tags for all resources
+tags = {
+  project     = "a2a-gateway"
+  environment = "demo"
+  managed_by  = "terraform"
+  owner       = "your-email@company.com"
+}

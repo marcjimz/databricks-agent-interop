@@ -501,6 +501,7 @@ The experiment must exist before the app starts (app will fail fast if not found
 
 | # | Issue | Status |
 |---|-------|--------|
+| 0 | Need to fix FastAPI doc | Tracked internally |
 | 1 | OAuth token manual passthrough required for OBO auth from Databricks notebooks to Databricks Apps | Tracked internally |
 | 2 | Enable agent discovery without requiring `-a2a` suffix on connection names | Open (non-blocking) |
 | 3 | Fix swagger documentation to support OAuth token injection from the UI via OBO | Open (non-blocking) |

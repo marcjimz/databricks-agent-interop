@@ -7,3 +7,8 @@ INSTRUCTIONS.md
 *.DS_Store*
 notebooks/settings.yaml
 .swarm*
+demo.md
+PLAN.md
+infra/azure/terraform/*.tfvars
+infra/azure/terraform/.terraform/
+infra/azure/terraform/terraform.tfstate*
