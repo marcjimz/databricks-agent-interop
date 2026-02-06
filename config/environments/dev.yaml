@@ -1,0 +1,16 @@
+# Development Environment Overrides
+# Override base gateway.yaml settings for dev environment
+
+gateway:
+  environment: "dev"
+
+azure:
+  location: "eastus2"
+  resource_prefix: "a2a-dev"
+
+apim:
+  sku: "Consumption"  # Cheapest for dev
+
+tracing:
+  enabled: true
+  log_level: "verbose"  # More detailed logging in dev

@@ -1,0 +1,45 @@
+<!--
+    JWT Validation Fragment
+    Validates tokens from Databricks OAuth or Entra ID
+-->
+<fragment>
+    <!-- Validate JWT from either Databricks or Entra ID -->
+    <validate-jwt header-name="Authorization" failed-validation-httpcode="401"
+                  failed-validation-error-message="Invalid or missing token"
+                  output-token-variable-name="jwt" require-scheme="Bearer">
+
+        <!-- Databricks OIDC configuration -->
+        <openid-config url="{{databricks-oidc-url}}" />
+
+        <!-- Entra ID OIDC configuration -->
+        <openid-config url="https://login.microsoftonline.com/{{entra-tenant-id}}/v2.0/.well-known/openid-configuration" />
+
+        <!-- Accepted issuers -->
+        <issuers>
+            <issuer>{{databricks-issuer}}</issuer>
+            <issuer>https://login.microsoftonline.com/{{entra-tenant-id}}/v2.0</issuer>
+            <issuer>https://sts.windows.net/{{entra-tenant-id}}/</issuer>
+        </issuers>
+    </validate-jwt>
+
+    <!-- Extract user email from token claims (try multiple claim names) -->
+    <set-variable name="user-email" value="@{
+        var jwt = (Jwt)context.Variables["jwt"];
+        // Try different claims in order of preference
+        return jwt.Claims.GetValueOrDefault("email",
+               jwt.Claims.GetValueOrDefault("upn",
+               jwt.Claims.GetValueOrDefault("preferred_username",
+               jwt.Claims.GetValueOrDefault("unique_name",
+               jwt.Claims.GetValueOrDefault("sub", "unknown")))));
+    }" />
+
+    <!-- Store the original token for later use -->
+    <set-variable name="original-token" value="@(context.Request.Headers.GetValueOrDefault("Authorization", "").Replace("Bearer ", ""))" />
+
+    <!-- Determine token issuer type -->
+    <set-variable name="is-entra-token" value="@{
+        var jwt = (Jwt)context.Variables["jwt"];
+        var issuer = jwt.Issuer ?? "";
+        return issuer.Contains("login.microsoftonline.com") || issuer.Contains("sts.windows.net");
+    }" />
+</fragment>

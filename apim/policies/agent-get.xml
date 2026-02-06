@@ -1,0 +1,96 @@
+<!--
+    Get Agent Policy
+    GET /agents/{name}
+
+    Returns agent information if user has USE_CONNECTION permission.
+    Uses the user's Databricks token (OBO) to check permission.
+-->
+<policies>
+    <inbound>
+        <base />
+
+        <!-- Build connection name -->
+        <set-variable name="connection-name" value="@($"{context.Request.MatchedParameters["name"]}-a2a")" />
+
+        <!-- Check permission via UC (as user - OBO) -->
+        <send-request mode="new" response-variable-name="ucResponse" timeout="10" ignore-error="true">
+            <set-url>@($"{{databricks-host}}/api/2.1/unity-catalog/connections/{context.Variables["connection-name"]}")</set-url>
+            <set-method>GET</set-method>
+            <set-header name="Authorization" exists-action="override">
+                <value>@($"Bearer {context.Variables["databricks-token"]}")</value>
+            </set-header>
+        </send-request>
+
+        <choose>
+            <!-- User has access -->
+            <when condition="@(((IResponse)context.Variables["ucResponse"]).StatusCode == 200)">
+                <return-response>
+                    <set-status code="200" />
+                    <set-header name="Content-Type" exists-action="override">
+                        <value>application/json</value>
+                    </set-header>
+                    <set-body>@{
+                        var conn = ((IResponse)context.Variables["ucResponse"]).Body.As<JObject>();
+                        var name = conn["name"]?.ToString() ?? "";
+                        var suffix = "-a2a";
+                        var agentName = name.EndsWith(suffix)
+                            ? name.Substring(0, name.Length - suffix.Length)
+                            : name;
+                        var options = conn["options"] as JObject ?? new JObject();
+
+                        return new JObject(
+                            new JProperty("name", agentName),
+                            new JProperty("description", conn["comment"]?.ToString() ?? ""),
+                            new JProperty("url", $"/agents/{agentName}"),
+                            new JProperty("agent_card_url", $"/agents/{agentName}/.well-known/agent.json"),
+                            new JProperty("connection", name),
+                            new JProperty("host", options["host"]?.ToString() ?? ""),
+                            new JProperty("base_path", options["base_path"]?.ToString() ?? "")
+                        ).ToString();
+                    }</set-body>
+                </return-response>
+            </when>
+
+            <!-- User lacks permission -->
+            <when condition="@(((IResponse)context.Variables["ucResponse"]).StatusCode == 403)">
+                <return-response>
+                    <set-status code="403" reason="Forbidden" />
+                    <set-header name="Content-Type" exists-action="override">
+                        <value>application/json</value>
+                    </set-header>
+                    <set-body>@{
+                        return new JObject(
+                            new JProperty("error", "access_denied"),
+                            new JProperty("message", $"Access denied to agent '{context.Request.MatchedParameters["name"]}'"),
+                            new JProperty("detail", "You don't have USE_CONNECTION permission"),
+                            new JProperty("connection", context.Variables["connection-name"])
+                        ).ToString();
+                    }</set-body>
+                </return-response>
+            </when>
+
+            <!-- Agent not found -->
+            <otherwise>
+                <return-response>
+                    <set-status code="404" reason="Not Found" />
+                    <set-header name="Content-Type" exists-action="override">
+                        <value>application/json</value>
+                    </set-header>
+                    <set-body>@{
+                        return new JObject(
+                            new JProperty("error", "agent_not_found"),
+                            new JProperty("message", $"Agent '{context.Request.MatchedParameters["name"]}' not found")
+                        ).ToString();
+                    }</set-body>
+                </return-response>
+            </otherwise>
+        </choose>
+    </inbound>
+    <backend />
+    <outbound>
+        <base />
+    </outbound>
+    <on-error>
+        <base />
+    </on-error>
+</policies>

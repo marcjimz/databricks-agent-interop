@@ -1,0 +1,165 @@
+<!--
+    Get Agent Card Policy
+    GET /agents/{name}/.well-known/agent.json
+
+    Generates A2A-compliant agent card from UC connection metadata.
+    First checks USE_CONNECTION permission via UC (implicit in GET).
+
+    Agent Card is generated dynamically from UC connection options:
+    - name: agent name (from URL path)
+    - url: options.host + options.base_path
+    - description: connection.comment
+    - securitySchemes: bearer token (JWT)
+-->
+<policies>
+    <inbound>
+        <base />
+
+        <!-- Build connection name -->
+        <set-variable name="connection-name" value="@($"{context.Request.MatchedParameters["name"]}-a2a")" />
+
+        <!-- Check permission and get connection data via UC (as user - OBO) -->
+        <send-request mode="new" response-variable-name="ucResponse" timeout="10" ignore-error="true">
+            <set-url>@($"{{databricks-host}}/api/2.1/unity-catalog/connections/{context.Variables["connection-name"]}")</set-url>
+            <set-method>GET</set-method>
+            <set-header name="Authorization" exists-action="override">
+                <value>@($"Bearer {context.Variables["databricks-token"]}")</value>
+            </set-header>
+        </send-request>
+
+        <choose>
+            <!-- User has access - generate agent card from UC connection -->
+            <when condition="@(((IResponse)context.Variables["ucResponse"]).StatusCode == 200)">
+                <!-- Log agent card generation -->
+                <trace source="a2a-gateway" severity="information">
+                    <message>@($"Agent card generated: {context.Request.MatchedParameters["name"]}")</message>
+                    <metadata name="request.id" value="@((string)context.Variables["request-id"])" />
+                    <metadata name="agent.name" value="@(context.Request.MatchedParameters["name"])" />
+                    <metadata name="agent.connection" value="@((string)context.Variables["connection-name"])" />
+                </trace>
+
+                <!-- Generate A2A-compliant agent card from UC connection metadata -->
+                <return-response>
+                    <set-status code="200" reason="OK" />
+                    <set-header name="Content-Type" exists-action="override">
+                        <value>application/json</value>
+                    </set-header>
+                    <set-body>@{
+                        var conn = ((IResponse)context.Variables["ucResponse"]).Body.As<JObject>();
+                        var options = conn["options"] as JObject;
+                        var agentName = context.Request.MatchedParameters["name"];
+
+                        // Extract connection options
+                        var host = options?["host"]?.ToString()?.TrimEnd('/') ?? "";
+                        var basePath = options?["base_path"]?.ToString() ?? "";
+                        var description = conn["comment"]?.ToString() ?? $"A2A Agent: {agentName}";
+
+                        // Build the agent endpoint URL
+                        var agentUrl = host + basePath;
+                        if (string.IsNullOrEmpty(agentUrl)) {
+                            agentUrl = $"https://{{databricks-host}}/agents/{agentName}";
+                        }
+
+                        // Check if backend expects Databricks auth passthrough
+                        var bearerToken = options?["bearer_token"]?.ToString()?.ToLower() ?? "";
+                        var authDescription = bearerToken == "databricks"
+                            ? "Databricks OAuth token (same tenant)"
+                            : "Bearer token";
+
+                        // Generate A2A Protocol compliant agent card
+                        // Per: https://a2a-protocol.org/latest/specification/
+                        return new JObject(
+                            // Required fields
+                            new JProperty("name", agentName),
+                            new JProperty("url", agentUrl),
+
+                            // Recommended fields
+                            new JProperty("description", description),
+                            new JProperty("version", "1.0.0"),
+                            new JProperty("provider", new JObject(
+                                new JProperty("organization", conn["owner"]?.ToString() ?? "Unknown"),
+                                new JProperty("url", "{{databricks-host}}")
+                            )),
+
+                            // Security schemes (per A2A spec section 4.5)
+                            new JProperty("securitySchemes", new JObject(
+                                new JProperty("bearer", new JObject(
+                                    new JProperty("type", "http"),
+                                    new JProperty("scheme", "bearer"),
+                                    new JProperty("bearerFormat", "JWT"),
+                                    new JProperty("description", authDescription)
+                                ))
+                            )),
+
+                            // Security requirements
+                            new JProperty("security", new JArray(
+                                new JObject(new JProperty("bearer", new JArray()))
+                            )),
+
+                            // Capabilities (inferred from A2A standard)
+                            new JProperty("capabilities", new JObject(
+                                new JProperty("streaming", true),
+                                new JProperty("pushNotifications", false)
+                            )),
+
+                            // Supported content types
+                            new JProperty("defaultInputModes", new JArray("text")),
+                            new JProperty("defaultOutputModes", new JArray("text")),
+
+                            // Gateway metadata
+                            new JProperty("_gateway", new JObject(
+                                new JProperty("type", "apim"),
+                                new JProperty("connection", (string)context.Variables["connection-name"]),
+                                new JProperty("version", "{{gateway-version}}")
+                            ))
+                        ).ToString();
+                    }</set-body>
+                </return-response>
+            </when>
+
+            <!-- User lacks permission -->
+            <when condition="@(((IResponse)context.Variables["ucResponse"]).StatusCode == 403)">
+                <return-response>
+                    <set-status code="403" reason="Forbidden" />
+                    <set-header name="Content-Type" exists-action="override">
+                        <value>application/json</value>
+                    </set-header>
+                    <set-body>@{
+                        return new JObject(
+                            new JProperty("error", "access_denied"),
+                            new JProperty("message", $"Access denied to agent '{context.Request.MatchedParameters["name"]}'"),
+                            new JProperty("hint", "Ensure you have USE_CONNECTION privilege on the agent's UC connection")
+                        ).ToString();
+                    }</set-body>
+                </return-response>
+            </when>
+
+            <!-- Agent not found -->
+            <otherwise>
+                <return-response>
+                    <set-status code="404" reason="Not Found" />
+                    <set-header name="Content-Type" exists-action="override">
+                        <value>application/json</value>
+                    </set-header>
+                    <set-body>@{
+                        return new JObject(
+                            new JProperty("error", "agent_not_found"),
+                            new JProperty("message", $"Agent '{context.Request.MatchedParameters["name"]}' not found"),
+                            new JProperty("hint", "Ensure a UC connection named '{context.Request.MatchedParameters["name"]}-a2a' exists")
+                        ).ToString();
+                    }</set-body>
+                </return-response>
+            </otherwise>
+        </choose>
+    </inbound>
+    <backend>
+        <!-- No backend call needed - response generated in inbound -->
+        <base />
+    </backend>
+    <outbound>
+        <base />
+    </outbound>
+    <on-error>
+        <base />
+    </on-error>
+</policies>

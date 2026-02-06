@@ -1,0 +1,86 @@
+<!--
+    List Agents Policy
+    GET /agents
+
+    Lists all A2A connections the user has access to.
+    Uses the user's Databricks token (OBO) to call UC connections.list API.
+-->
+<policies>
+    <inbound>
+        <base />
+
+        <!-- Call UC to list connections (as user - OBO) -->
+        <send-request mode="new" response-variable-name="connectionsResponse" timeout="30" ignore-error="true">
+            <set-url>{{databricks-host}}/api/2.1/unity-catalog/connections</set-url>
+            <set-method>GET</set-method>
+            <set-header name="Authorization" exists-action="override">
+                <value>@($"Bearer {context.Variables["databricks-token"]}")</value>
+            </set-header>
+        </send-request>
+
+        <choose>
+            <when condition="@(((IResponse)context.Variables["connectionsResponse"]).StatusCode == 200)">
+                <!-- Parse and filter A2A connections -->
+                <return-response>
+                    <set-status code="200" />
+                    <set-header name="Content-Type" exists-action="override">
+                        <value>application/json</value>
+                    </set-header>
+                    <set-body>@{
+                        var response = ((IResponse)context.Variables["connectionsResponse"]).Body.As<JObject>();
+                        var connections = response["connections"] as JArray ?? new JArray();
+                        var suffix = "{{a2a-connection-suffix}}";
+
+                        var agents = new JArray();
+                        foreach (JObject conn in connections) {
+                            var name = conn["name"]?.ToString() ?? "";
+                            if (name.EndsWith(suffix)) {
+                                var agentName = name.Substring(0, name.Length - suffix.Length);
+                                var options = conn["options"] as JObject ?? new JObject();
+
+                                agents.Add(new JObject(
+                                    new JProperty("name", agentName),
+                                    new JProperty("description", conn["comment"]?.ToString() ?? ""),
+                                    new JProperty("url", $"/agents/{agentName}"),
+                                    new JProperty("connection", name),
+                                    new JProperty("host", options["host"]?.ToString() ?? "")
+                                ));
+                            }
+                        }
+
+                        return new JObject(
+                            new JProperty("agents", agents),
+                            new JProperty("total", agents.Count),
+                            new JProperty("user", context.Variables["user-email"])
+                        ).ToString();
+                    }</set-body>
+                </return-response>
+            </when>
+            <otherwise>
+                <return-response>
+                    <set-status code="500" />
+                    <set-header name="Content-Type" exists-action="override">
+                        <value>application/json</value>
+                    </set-header>
+                    <set-body>@{
+                        var statusCode = ((IResponse)context.Variables["connectionsResponse"]).StatusCode;
+                        return new JObject(
+                            new JProperty("error", "discovery_failed"),
+                            new JProperty("message", "Failed to list agents from Unity Catalog"),
+                            new JProperty("status_code", statusCode)
+                        ).ToString();
+                    }</set-body>
+                </return-response>
+            </otherwise>
+        </choose>
+    </inbound>
+    <backend>
+        <!-- No backend call needed - response built from UC data -->
+    </backend>
+    <outbound>
+        <base />
+    </outbound>
+    <on-error>
+        <base />
+    </on-error>
+</policies>

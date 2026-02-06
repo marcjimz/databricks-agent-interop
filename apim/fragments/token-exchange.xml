@@ -1,0 +1,61 @@
+<!--
+    Token Exchange Fragment
+    Exchanges Entra ID tokens for Databricks tokens (RFC 8693)
+    If already a Databricks token, uses it directly
+-->
+<fragment>
+    <choose>
+        <!-- If Entra ID token, exchange for Databricks token -->
+        <when condition="@((bool)context.Variables["is-entra-token"])">
+            <send-request mode="new" response-variable-name="tokenExchangeResponse" timeout="30" ignore-error="false">
+                <set-url>{{databricks-host}}/oidc/v1/token</set-url>
+                <set-method>POST</set-method>
+                <set-header name="Content-Type" exists-action="override">
+                    <value>application/x-www-form-urlencoded</value>
+                </set-header>
+                <set-body>@{
+                    var token = (string)context.Variables["original-token"];
+                    return $"grant_type=urn:ietf:params:oauth:grant-type:token-exchange" +
+                           $"&subject_token={System.Net.WebUtility.UrlEncode(token)}" +
+                           $"&subject_token_type=urn:ietf:params:oauth:token-type:jwt" +
+                           $"&scope=all-apis";
+                }</set-body>
+            </send-request>
+
+            <choose>
+                <!-- Token exchange successful -->
+                <when condition="@(((IResponse)context.Variables["tokenExchangeResponse"]).StatusCode == 200)">
+                    <set-variable name="databricks-token" value="@{
+                        var body = ((IResponse)context.Variables["tokenExchangeResponse"]).Body.As<JObject>();
+                        return body["access_token"]?.ToString() ?? "";
+                    }" />
+                </when>
+
+                <!-- Token exchange failed -->
+                <otherwise>
+                    <return-response>
+                        <set-status code="401" reason="Token Exchange Failed" />
+                        <set-header name="Content-Type" exists-action="override">
+                            <value>application/json</value>
+                        </set-header>
+                        <set-body>@{
+                            var response = ((IResponse)context.Variables["tokenExchangeResponse"]);
+                            var errorBody = response.Body.As<string>();
+                            return new JObject(
+                                new JProperty("error", "token_exchange_failed"),
+                                new JProperty("message", "Failed to exchange Entra ID token for Databricks access"),
+                                new JProperty("hint", "Ensure the Databricks workspace is federated with Entra ID"),
+                                new JProperty("details", errorBody)
+                            ).ToString();
+                        }</set-body>
+                    </return-response>
+                </otherwise>
+            </choose>
+        </when>
+
+        <!-- Already a Databricks token, use directly -->
+        <otherwise>
+            <set-variable name="databricks-token" value="@((string)context.Variables["original-token"])" />
+        </otherwise>
+    </choose>
+</fragment>

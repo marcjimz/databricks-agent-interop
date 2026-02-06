@@ -1,1 +1,1 @@
-"""Unit tests for A2A Gateway."""
+# Unit tests for A2A Gateway scripts

@@ -1,0 +1,16 @@
+# Staging Environment Overrides
+# Override base gateway.yaml settings for staging environment
+
+gateway:
+  environment: "staging"
+
+azure:
+  location: "eastus2"
+  resource_prefix: "a2a-staging"
+
+apim:
+  sku: "Developer"  # Better performance for staging tests
+
+tracing:
+  enabled: true
+  log_level: "information"

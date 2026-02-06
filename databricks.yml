@@ -8,6 +8,9 @@ variables:
   trace_catalog:
     description: "Existing Unity Catalog for trace storage (must already exist)"
     default: "marcin_demo"
+  budget_policy_id:
+    description: "Workspace default budget policy ID (workaround for Terraform provider bug)"
+    default: "45e016d4-ace8-407d-870f-3f06123daee1"
 
 sync:
   include:
@@ -45,16 +48,23 @@ resources:
       name: "${var.name_prefix}-a2a-gateway"
       description: "A2A Gateway for agent discovery and proxying"
       source_code_path: ./gateway
+      budget_policy_id: "${var.budget_policy_id}"
+      # User authorization scopes - enables OBO (on-behalf-of) token forwarding
+      # Requires workspace admin to enable "User Authorization" in Previews
+      user_api_scopes:
+        - catalog.connections  # Required: list/access UC connections for agent discovery
 
     echo_agent:
       name: "${var.name_prefix}-echo-agent"
       description: "Echo Agent for A2A testing"
       source_code_path: ./src/agents/echo
+      budget_policy_id: "${var.budget_policy_id}"
 
     calculator_agent:
       name: "${var.name_prefix}-calculator-agent"
       description: "Calculator Agent for A2A demo"
       source_code_path: ./src/agents/calculator
+      budget_policy_id: "${var.budget_policy_id}"
 
     # Uncomment to deploy the Assistant Agent (requires available app slots)
     # assistant_agent:

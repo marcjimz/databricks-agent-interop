@@ -1,0 +1,176 @@
+<!--
+    A2A Gateway API Policy
+    Applied to all operations in the A2A Gateway API
+
+    This policy handles:
+    1. Request tracing (correlation ID, custom dimensions)
+    2. Entra ID OAuth token validation (U2M flow)
+    3. Token exchange (Entra ID -> Databricks)
+
+    Uses validate-azure-ad-token for simplified Entra ID OAuth support.
+    No OIDC discovery URL needed - automatic for Entra ID.
+
+    Flow:
+    1. User authenticates via Entra ID OAuth (Foundry/Copilot/etc)
+    2. APIM validates the Entra ID token
+    3. APIM exchanges token for Databricks token
+    4. UC operations use Databricks token (OBO)
+-->
+<policies>
+    <inbound>
+        <!-- Generate or propagate correlation ID for tracing -->
+        <set-variable name="request-id" value="@{
+            var correlationId = context.Request.Headers.GetValueOrDefault("X-Correlation-ID", "");
+            if (string.IsNullOrEmpty(correlationId)) {
+                correlationId = context.Request.Headers.GetValueOrDefault("X-Request-ID", "");
+            }
+            if (string.IsNullOrEmpty(correlationId)) {
+                correlationId = $"req-{Guid.NewGuid().ToString("N").Substring(0, 16)}";
+            }
+            return correlationId;
+        }" />
+
+        <!-- Log request start for tracing -->
+        <trace source="a2a-gateway" severity="information">
+            <message>@($"Request started: {context.Variables["request-id"]}")</message>
+            <metadata name="request.id" value="@((string)context.Variables["request-id"])" />
+            <metadata name="request.path" value="@(context.Request.Url.Path)" />
+            <metadata name="request.method" value="@(context.Request.Method)" />
+            <metadata name="gateway.version" value="{{gateway-version}}" />
+            <metadata name="gateway.environment" value="{{gateway-environment}}" />
+        </trace>
+
+        <!-- Validate Entra ID OAuth token (U2M flow) -->
+        <!-- This is simpler than validate-jwt with OIDC - automatic key rotation -->
+        <validate-azure-ad-token
+            tenant-id="{{entra-tenant-id}}"
+            header-name="Authorization"
+            failed-validation-httpcode="401"
+            failed-validation-error-message="Invalid or missing Entra ID OAuth token"
+            output-token-variable-name="jwt">
+            <!-- Optional: Restrict to specific client apps -->
+            <!-- <client-application-ids>
+                <application-id>{{allowed-client-app-id}}</application-id>
+            </client-application-ids> -->
+        </validate-azure-ad-token>
+
+        <!-- Extract user identity from Entra token -->
+        <set-variable name="user-email" value="@{
+            var jwt = (Jwt)context.Variables["jwt"];
+            // Entra ID tokens use these claims for user identity
+            return jwt.Claims.GetValueOrDefault("preferred_username",
+                   jwt.Claims.GetValueOrDefault("upn",
+                   jwt.Claims.GetValueOrDefault("email",
+                   jwt.Claims.GetValueOrDefault("unique_name",
+                   jwt.Claims.GetValueOrDefault("sub", "unknown")))));
+        }" />
+
+        <!-- Store original token for exchange -->
+        <set-variable name="original-token" value="@(context.Request.Headers.GetValueOrDefault("Authorization", "").Replace("Bearer ", ""))" />
+
+        <!-- Log user context for tracing -->
+        <trace source="a2a-gateway" severity="information">
+            <message>@($"User authenticated via Entra ID: {context.Variables["user-email"]}")</message>
+            <metadata name="request.id" value="@((string)context.Variables["request-id"])" />
+            <metadata name="user.email" value="@((string)context.Variables["user-email"])" />
+            <metadata name="user.authenticated" value="true" />
+            <metadata name="auth.type" value="entra-oauth-u2m" />
+        </trace>
+
+        <!-- Exchange Entra token for Databricks token (RFC 8693) -->
+        <send-request mode="new" response-variable-name="tokenExchangeResponse" timeout="30" ignore-error="false">
+            <set-url>{{databricks-host}}/oidc/v1/token</set-url>
+            <set-method>POST</set-method>
+            <set-header name="Content-Type" exists-action="override">
+                <value>application/x-www-form-urlencoded</value>
+            </set-header>
+            <set-body>@{
+                var token = (string)context.Variables["original-token"];
+                return $"grant_type=urn:ietf:params:oauth:grant-type:token-exchange&subject_token={System.Net.WebUtility.UrlEncode(token)}&subject_token_type=urn:ietf:params:oauth:token-type:jwt&scope=all-apis";
+            }</set-body>
+        </send-request>
+
+        <choose>
+            <when condition="@(((IResponse)context.Variables["tokenExchangeResponse"]).StatusCode == 200)">
+                <set-variable name="databricks-token" value="@{
+                    var body = ((IResponse)context.Variables["tokenExchangeResponse"]).Body.As<JObject>();
+                    return body["access_token"]?.ToString() ?? "";
+                }" />
+                <trace source="a2a-gateway" severity="information">
+                    <message>Token exchange successful</message>
+                    <metadata name="request.id" value="@((string)context.Variables["request-id"])" />
+                    <metadata name="token.exchange" value="success" />
+                </trace>
+            </when>
+            <otherwise>
+                <trace source="a2a-gateway" severity="error">
+                    <message>Token exchange failed</message>
+                    <metadata name="request.id" value="@((string)context.Variables["request-id"])" />
+                    <metadata name="token.exchange" value="failed" />
+                    <metadata name="exchange.status" value="@(((IResponse)context.Variables["tokenExchangeResponse"]).StatusCode.ToString())" />
+                </trace>
+                <return-response>
+                    <set-status code="401" reason="Token Exchange Failed" />
+                    <set-header name="Content-Type" exists-action="override">
+                        <value>application/json</value>
+                    </set-header>
+                    <set-body>@{
+                        return new JObject(
+                            new JProperty("error", "token_exchange_failed"),
+                            new JProperty("message", "Failed to exchange Entra ID token for Databricks access"),
+                            new JProperty("hint", "Ensure the Databricks workspace is federated with your Entra ID tenant"),
+                            new JProperty("request_id", context.Variables["request-id"])
+                        ).ToString();
+                    }</set-body>
+                </return-response>
+            </otherwise>
+        </choose>
+
+        <base />
+    </inbound>
+    <backend>
+        <base />
+    </backend>
+    <outbound>
+        <!-- Add gateway headers to response -->
+        <set-header name="X-A2A-Gateway" exists-action="override">
+            <value>apim</value>
+        </set-header>
+        <set-header name="X-User-Email" exists-action="override">
+            <value>@((string)context.Variables["user-email"])</value>
+        </set-header>
+        <set-header name="X-Request-ID" exists-action="override">
+            <value>@((string)context.Variables["request-id"])</value>
+        </set-header>
+
+        <!-- Log response for tracing -->
+        <trace source="a2a-gateway" severity="information">
+            <message>@($"Request completed: {context.Variables["request-id"]} - {context.Response.StatusCode}")</message>
+            <metadata name="request.id" value="@((string)context.Variables["request-id"])" />
+            <metadata name="response.status" value="@(context.Response.StatusCode.ToString())" />
+            <metadata name="response.time_ms" value="@(context.Elapsed.TotalMilliseconds.ToString("F0"))" />
+        </trace>
+
+        <base />
+    </outbound>
+    <on-error>
+        <trace source="a2a-gateway" severity="error">
+            <message>@($"Request error: {context.Variables["request-id"]} - {context.LastError.Message}")</message>
+            <metadata name="request.id" value="@((string)context.Variables["request-id"])" />
+            <metadata name="error.source" value="@(context.LastError.Source ?? "unknown")" />
+            <metadata name="error.reason" value="@(context.LastError.Reason ?? "")" />
+        </trace>
+        <set-header name="Content-Type" exists-action="override">
+            <value>application/json</value>
+        </set-header>
+        <set-body>@{
+            return new JObject(
+                new JProperty("error", context.LastError.Source ?? "unknown"),
+                new JProperty("message", context.LastError.Message ?? "An error occurred"),
+                new JProperty("reason", context.LastError.Reason ?? ""),
+                new JProperty("request_id", context.Variables["request-id"])
+            ).ToString();
+        }</set-body>
+        <base />
+    </on-error>
+</policies>

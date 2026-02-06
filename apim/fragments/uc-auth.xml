@@ -1,0 +1,87 @@
+<!--
+    Unity Catalog Authorization Fragment
+    Checks if user has USE_CONNECTION permission on the agent's connection
+
+    Uses the USER's Databricks token (OBO) to call UC API.
+    If UC returns 200, user is authorized. If 403 or 404, deny access.
+-->
+<fragment>
+    <!-- Build connection name from agent name -->
+    <set-variable name="connection-name" value="@($"{context.Request.MatchedParameters["name"]}{{a2a-connection-suffix}}")" />
+
+    <!-- Call UC GET /connections/{name} with USER's token (true OBO) -->
+    <send-request mode="new" response-variable-name="ucResponse" timeout="10" ignore-error="true">
+        <set-url>@($"{{databricks-host}}/api/2.1/unity-catalog/connections/{context.Variables["connection-name"]}")</set-url>
+        <set-method>GET</set-method>
+        <set-header name="Authorization" exists-action="override">
+            <value>@($"Bearer {context.Variables["databricks-token"]}")</value>
+        </set-header>
+    </send-request>
+
+    <choose>
+        <!-- 200: User has USE_CONNECTION permission -->
+        <when condition="@(((IResponse)context.Variables["ucResponse"]).StatusCode == 200)">
+            <!-- Parse connection data -->
+            <set-variable name="connection-data" value="@(((IResponse)context.Variables["ucResponse"]).Body.As<JObject>())" />
+
+            <!-- Extract backend URL from connection options -->
+            <set-variable name="backend-host" value="@{
+                var conn = (JObject)context.Variables["connection-data"];
+                var options = conn["options"] as JObject;
+                var host = options?["host"]?.ToString() ?? "";
+                return host.TrimEnd('/');
+            }" />
+
+            <set-variable name="backend-path" value="@{
+                var conn = (JObject)context.Variables["connection-data"];
+                var options = conn["options"] as JObject;
+                return options?["base_path"]?.ToString() ?? "";
+            }" />
+
+            <!-- Extract connection metadata -->
+            <set-variable name="agent-description" value="@{
+                var conn = (JObject)context.Variables["connection-data"];
+                return conn["comment"]?.ToString() ?? "";
+            }" />
+        </when>
+
+        <!-- 403: User lacks USE_CONNECTION permission -->
+        <when condition="@(((IResponse)context.Variables["ucResponse"]).StatusCode == 403)">
+            <return-response>
+                <set-status code="403" reason="Forbidden" />
+                <set-header name="Content-Type" exists-action="override">
+                    <value>application/json</value>
+                </set-header>
+                <set-body>@{
+                    return new JObject(
+                        new JProperty("error", "access_denied"),
+                        new JProperty("message", $"Access denied to agent '{context.Request.MatchedParameters["name"]}'"),
+                        new JProperty("detail", "You don't have USE_CONNECTION permission on this agent"),
+                        new JProperty("user", context.Variables["user-email"]),
+                        new JProperty("connection", context.Variables["connection-name"]),
+                        new JProperty("hint", "Request access from the agent owner via Unity Catalog grants")
+                    ).ToString();
+                }</set-body>
+            </return-response>
+        </when>
+
+        <!-- 404 or other error: Agent not found -->
+        <otherwise>
+            <return-response>
+                <set-status code="404" reason="Not Found" />
+                <set-header name="Content-Type" exists-action="override">
+                    <value>application/json</value>
+                </set-header>
+                <set-body>@{
+                    var statusCode = ((IResponse)context.Variables["ucResponse"]).StatusCode;
+                    return new JObject(
+                        new JProperty("error", "agent_not_found"),
+                        new JProperty("message", $"Agent '{context.Request.MatchedParameters["name"]}' not found"),
+                        new JProperty("detail", $"No connection '{context.Variables["connection-name"]}' exists in Unity Catalog"),
+                        new JProperty("hint", "Register the agent by creating a UC connection with the -a2a suffix")
+                    ).ToString();
+                }</set-body>
+            </return-response>
+        </otherwise>
+    </choose>
+</fragment>

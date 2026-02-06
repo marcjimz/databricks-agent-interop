@@ -1,0 +1,100 @@
+# A2A Gateway Configuration
+# Single entry point for all gateway configuration
+#
+# Environment variables are referenced as ${VAR_NAME}
+# Default values: ${VAR_NAME:-default}
+#
+# Usage:
+#   - Set environment variables or use .env file
+#   - Override per-environment in config/environments/{env}.yaml
+
+# Gateway Metadata
+gateway:
+  name: "a2a-gateway"
+  version: "1.0.0"
+  environment: "${ENVIRONMENT:-dev}"
+
+# Databricks Configuration
+# Required: DATABRICKS_HOST, DATABRICKS_WORKSPACE_ID
+databricks:
+  # Workspace URL (e.g., https://adb-123456789.10.azuredatabricks.net)
+  host: "${DATABRICKS_HOST}"
+
+  # Workspace ID (numeric, for audience validation)
+  workspace_id: "${DATABRICKS_WORKSPACE_ID}"
+
+  # OIDC discovery URL (auto-derived from host)
+  # Format: {host}/oidc/.well-known/openid-configuration
+  oidc_url: "${DATABRICKS_HOST}/oidc/.well-known/openid-configuration"
+
+  # Token issuer (auto-derived from host)
+  issuer: "${DATABRICKS_HOST}/oidc"
+
+  # UC connection suffix for A2A agents
+  connection_suffix: "-a2a"
+
+# Entra ID (Azure AD) Configuration
+# Required: ENTRA_TENANT_ID
+entra:
+  # Tenant ID (GUID)
+  tenant_id: "${ENTRA_TENANT_ID}"
+
+  # Optional: App registration client ID for APIM
+  # Required for Foundry/Copilot OAuth integration
+  client_id: "${ENTRA_CLIENT_ID:-}"
+
+# Azure Resource Configuration
+azure:
+  # Azure region for deployment
+  location: "${AZURE_LOCATION:-eastus2}"
+
+  # Resource naming prefix
+  resource_prefix: "${RESOURCE_PREFIX:-a2a}"
+
+  # Resource group name (auto-generated if not specified)
+  resource_group: "${RESOURCE_GROUP:-}"
+
+# APIM Configuration
+apim:
+  # SKU: Consumption, Developer, Basic, Standard, Premium
+  sku: "${APIM_SKU:-Consumption}"
+
+  # Publisher information
+  publisher_name: "${APIM_PUBLISHER_NAME:-A2A Gateway}"
+  publisher_email: "${APIM_PUBLISHER_EMAIL}"
+
+# Tracing Configuration
+tracing:
+  # Enable Application Insights tracing
+  enabled: true
+
+  # Log level: error, warning, information, verbose
+  log_level: "information"
+
+# UC Connection Schema
+# Documents the expected structure of UC connections for A2A agents
+# This is informational - actual connections are created in Databricks
+connection_schema:
+  # Connection name format: {agent-name}-a2a
+  name_format: "{agent_name}-a2a"
+
+  # Required options in UC connection
+  required_options:
+    - host        # Agent backend URL (e.g., https://agent.example.com)
+    - base_path   # Agent endpoint path (e.g., /a2a)
+
+  # Optional options
+  optional_options:
+    - bearer_token  # "databricks" for passthrough, or static token
+    - client_id     # For OAuth M2M (not currently supported)
+    - client_secret # For OAuth M2M (not currently supported)
+    - token_endpoint # For OAuth M2M (not currently supported)
+
+  # Example connection creation (SQL):
+  # CREATE CONNECTION echo-a2a TYPE HTTP
+  # OPTIONS (
+  #   host 'https://echo-agent.azurewebsites.net',
+  #   base_path '/a2a',
+  #   bearer_token 'databricks'
+  # )
+  # COMMENT 'Echo agent for testing';

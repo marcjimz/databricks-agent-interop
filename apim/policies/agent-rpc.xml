@@ -1,0 +1,139 @@
+<!--
+    Agent RPC Policy
+    POST /agents/{name}
+
+    Proxies A2A JSON-RPC requests to the backend agent.
+    First checks USE_CONNECTION permission via UC.
+-->
+<policies>
+    <inbound>
+        <base />
+
+        <!-- Build connection name -->
+        <set-variable name="connection-name" value="@($"{context.Request.MatchedParameters["name"]}-a2a")" />
+
+        <!-- Check permission and get backend URL via UC (as user - OBO) -->
+        <send-request mode="new" response-variable-name="ucResponse" timeout="10" ignore-error="true">
+            <set-url>@($"{{databricks-host}}/api/2.1/unity-catalog/connections/{context.Variables["connection-name"]}")</set-url>
+            <set-method>GET</set-method>
+            <set-header name="Authorization" exists-action="override">
+                <value>@($"Bearer {context.Variables["databricks-token"]}")</value>
+            </set-header>
+        </send-request>
+
+        <choose>
+            <!-- User has access - proxy to backend -->
+            <when condition="@(((IResponse)context.Variables["ucResponse"]).StatusCode == 200)">
+                <!-- Log agent access for tracing -->
+                <trace source="a2a-gateway" severity="information">
+                    <message>@($"Agent access granted: {context.Request.MatchedParameters["name"]}")</message>
+                    <metadata name="request.id" value="@((string)context.Variables["request-id"])" />
+                    <metadata name="agent.name" value="@(context.Request.MatchedParameters["name"])" />
+                    <metadata name="agent.connection" value="@((string)context.Variables["connection-name"])" />
+                    <metadata name="agent.method" value="rpc" />
+                    <metadata name="user.email" value="@((string)context.Variables["user-email"])" />
+                </trace>
+
+                <!-- Extract backend URL and auth config -->
+                <set-variable name="connection-data" value="@(((IResponse)context.Variables["ucResponse"]).Body.As<JObject>())" />
+                <set-variable name="backend-host" value="@{
+                    var conn = (JObject)context.Variables["connection-data"];
+                    var options = conn["options"] as JObject;
+                    return options?["host"]?.ToString()?.TrimEnd('/') ?? "";
+                }" />
+                <set-variable name="backend-path" value="@{
+                    var conn = (JObject)context.Variables["connection-data"];
+                    var options = conn["options"] as JObject;
+                    return options?["base_path"]?.ToString() ?? "";
+                }" />
+                <set-variable name="backend-auth" value="@{
+                    var conn = (JObject)context.Variables["connection-data"];
+                    var options = conn["options"] as JObject;
+                    var token = options?["bearer_token"]?.ToString() ?? "";
+                    // If "databricks", pass through user's token; otherwise use configured token
+                    if (token.ToLower() == "databricks") {
+                        return (string)context.Variables["databricks-token"];
+                    }
+                    return token;
+                }" />
+
+                <!-- Set backend URL -->
+                <set-backend-service base-url="@((string)context.Variables["backend-host"])" />
+                <rewrite-uri template="@{
+                    var basePath = (string)context.Variables["backend-path"];
+                    return string.IsNullOrEmpty(basePath) ? "/" : basePath;
+                }" />
+
+                <!-- Set auth header if configured -->
+                <choose>
+                    <when condition="@(!string.IsNullOrEmpty((string)context.Variables["backend-auth"]))">
+                        <set-header name="Authorization" exists-action="override">
+                            <value>@($"Bearer {context.Variables["backend-auth"]}")</value>
+                        </set-header>
+                    </when>
+                </choose>
+
+                <!-- Pass user context to backend -->
+                <set-header name="X-User-Email" exists-action="override">
+                    <value>@((string)context.Variables["user-email"])</value>
+                </set-header>
+                <set-header name="X-A2A-Gateway" exists-action="override">
+                    <value>apim</value>
+                </set-header>
+            </when>
+
+            <!-- User lacks permission -->
+            <when condition="@(((IResponse)context.Variables["ucResponse"]).StatusCode == 403)">
+                <return-response>
+                    <set-status code="403" reason="Forbidden" />
+                    <set-header name="Content-Type" exists-action="override">
+                        <value>application/json</value>
+                    </set-header>
+                    <set-body>@{
+                        return new JObject(
+                            new JProperty("jsonrpc", "2.0"),
+                            new JProperty("error", new JObject(
+                                new JProperty("code", -32600),
+                                new JProperty("message", $"Access denied to agent '{context.Request.MatchedParameters["name"]}'"),
+                                new JProperty("data", new JObject(
+                                    new JProperty("connection", context.Variables["connection-name"]),
+                                    new JProperty("user", context.Variables["user-email"])
+                                ))
+                            )),
+                            new JProperty("id", null)
+                        ).ToString();
+                    }</set-body>
+                </return-response>
+            </when>
+
+            <!-- Agent not found -->
+            <otherwise>
+                <return-response>
+                    <set-status code="404" reason="Not Found" />
+                    <set-header name="Content-Type" exists-action="override">
+                        <value>application/json</value>
+                    </set-header>
+                    <set-body>@{
+                        return new JObject(
+                            new JProperty("jsonrpc", "2.0"),
+                            new JProperty("error", new JObject(
+                                new JProperty("code", -32601),
+                                new JProperty("message", $"Agent '{context.Request.MatchedParameters["name"]}' not found")
+                            )),
+                            new JProperty("id", null)
+                        ).ToString();
+                    }</set-body>
+                </return-response>
+            </otherwise>
+        </choose>
+    </inbound>
+    <backend>
+        <base />
+    </backend>
+    <outbound>
+        <base />
+    </outbound>
+    <on-error>
+        <base />
+    </on-error>
+</policies>

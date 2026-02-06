@@ -1,5 +1,20 @@
+# Test dependencies for A2A Gateway
+
+# Core testing
 pytest>=7.0.0
-pytest-asyncio>=0.21.0
-httpx>=0.24.0
+pytest-env>=0.8.0
+
+# HTTP client for integration tests
+requests>=2.28.0
+
+# Mocking
+pytest-mock>=3.10.0
+
+# SDK for unit tests (mocking)
 databricks-sdk>=0.20.0
-a2a-sdk==0.3.22
+
+# Optional: async testing
+pytest-asyncio>=0.21.0
+
+# Optional: coverage reporting
+pytest-cov>=4.0.0

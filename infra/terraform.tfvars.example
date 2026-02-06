@@ -1,0 +1,23 @@
+# Copy this to terraform.tfvars and fill in values
+
+environment     = "dev"
+location        = "eastus2"
+resource_prefix = "a2a"
+
+# Databricks Configuration
+databricks_host         = "https://your-workspace.cloud.databricks.com"
+databricks_workspace_id = "1234567890123456"
+
+# Entra ID Configuration
+entra_tenant_id = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+
+# APIM Configuration
+apim_sku             = "Consumption"
+apim_publisher_name  = "Your Organization"
+apim_publisher_email = "admin@yourorg.com"
+
+# Tags
+tags = {
+  Owner   = "your-team"
+  Purpose = "a2a-gateway"
+}
