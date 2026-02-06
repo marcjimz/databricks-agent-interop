@@ -1,78 +1,23 @@
 bundle:
-  name: a2a-gateway
+  name: a2a-agents
 
 variables:
   name_prefix:
     description: "Prefix for all resource names"
-    default: "marcin"
-  trace_catalog:
-    description: "Existing Unity Catalog for trace storage (must already exist)"
-    default: "marcin_demo"
-  budget_policy_id:
-    description: "Workspace default budget policy ID (workaround for Terraform provider bug)"
-    default: "45e016d4-ace8-407d-870f-3f06123daee1"
-
-sync:
-  include:
-    - notebooks/*
+    default: "a2a"
 
 resources:
-  # MLflow experiment for viewing traces in the UI
-  experiments:
-    a2a_gateway_traces:
-      name: "/Shared/a2a-gateway-traces"
-      permissions:
-        - service_principal_name: "${resources.apps.a2a_gateway.service_principal_client_id}"
-          level: CAN_MANAGE
-
-  # Unity Catalog schema for trace storage
-  # NOTE: The catalog must already exist. Set trace_catalog variable to specify which catalog to use.
-  # After deployment, grant USE_CATALOG to the app's service principal:
-  #   SP_ID=$(databricks apps get ${var.name_prefix}-a2a-gateway --output json | jq -r '.service_principal_client_id')
-  #   databricks grants update catalog ${var.trace_catalog} --json "{\"changes\":[{\"add\":[\"USE_CATALOG\"],\"principal\":\"${SP_ID}\"}]}"
-  schemas:
-    gateway_schema:
-      name: "a2a_gateway"
-      catalog_name: "${var.trace_catalog}"
-      comment: "Schema for A2A Gateway traces and metadata"
-      grants:
-        - principal: "${resources.apps.a2a_gateway.service_principal_client_id}"
-          privileges:
-            - USE_SCHEMA
-            - CREATE_TABLE
-            - SELECT
-            - MODIFY
-
   apps:
-    a2a_gateway:
-      name: "${var.name_prefix}-a2a-gateway"
-      description: "A2A Gateway for agent discovery and proxying"
-      source_code_path: ./gateway
-      budget_policy_id: "${var.budget_policy_id}"
-      # User authorization scopes - enables OBO (on-behalf-of) token forwarding
-      # Requires workspace admin to enable "User Authorization" in Previews
-      user_api_scopes:
-        - catalog.connections  # Required: list/access UC connections for agent discovery
-
     echo_agent:
       name: "${var.name_prefix}-echo-agent"
       description: "Echo Agent for A2A testing"
       source_code_path: ./src/agents/echo
-      budget_policy_id: "${var.budget_policy_id}"
 
     calculator_agent:
       name: "${var.name_prefix}-calculator-agent"
       description: "Calculator Agent for A2A demo"
       source_code_path: ./src/agents/calculator
-      budget_policy_id: "${var.budget_policy_id}"
-
-    # Uncomment to deploy the Assistant Agent (requires available app slots)
-    # assistant_agent:
-    #   name: "${var.name_prefix}-assistant-agent"
-    #   description: "Assistant Agent - orchestrates other A2A agents"
-    #   source_code_path: ./src/agents/assistant
 
 targets:
   dev:
     default: true
-    # Uses default CLI profile. Override with: databricks bundle deploy -p <profile>

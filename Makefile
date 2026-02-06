@@ -1,62 +1,189 @@
-PREFIX ?= marcin
-BUNDLE_PATH ?= /Workspace/Users/marcin.jimenez@databricks.com/.bundle/a2a-gateway/dev/files
-TRACE_CATALOG ?= marcin_demo
+# A2A Gateway Makefile
+# Configure config/.env then run: make deploy
 
-auth:
-	databricks auth login
+# Load config
+-include config/.env
+export
+
+# Required variables (set in config/.env)
+ENTRA_TENANT_ID ?=
+DATABRICKS_HOST ?=
+DATABRICKS_WORKSPACE_ID ?=
+APIM_PUBLISHER_EMAIL ?=
+
+# Optional variables
+ENVIRONMENT ?= dev
+LOCATION ?= eastus2
+PREFIX ?= a2a
+
+.PHONY: help deploy deploy-agents destroy destroy-agents status register-agents register grant revoke token test test-unit test-compliance test-agents
+
+help:
+	@echo "A2A Gateway Commands:"
+	@echo ""
+	@echo "Quick Start:"
+	@echo "  make deploy              Deploy APIM gateway (Terraform)"
+	@echo "  make deploy-agents       Deploy echo/calculator agents (Databricks Apps)"
+	@echo "  make register-agents USER=x   Register deployed agents + grant access"
+	@echo "  make test-agents         Test echo and calculator agents"
+	@echo ""
+	@echo "Infrastructure:"
+	@echo "  make destroy             Destroy APIM infrastructure"
+	@echo "  make destroy-agents      Destroy Databricks agents"
+	@echo "  make status              Show gateway URL and agent URLs"
+	@echo ""
+	@echo "Register Other Agents:"
+	@echo "  make register-databricks NAME=x HOST=y   Databricks agent (token passthrough)"
+	@echo "  make register-external NAME=x HOST=y     External agent (optional TOKEN=z)"
+	@echo ""
+	@echo "Access Control:"
+	@echo "  make grant NAME=x USER=y      Grant USE_CONNECTION to user"
+	@echo "  make revoke NAME=x USER=y     Revoke USE_CONNECTION from user"
+	@echo ""
+	@echo "Setup: cp config/.env.example config/.env && edit && make deploy"
+
+# === Infrastructure ===
 
 deploy:
-	databricks bundle deploy
-	@echo "Granting USE_CATALOG on $(TRACE_CATALOG) to gateway service principal..."
-	@SP_ID=$$(databricks apps get $(PREFIX)-a2a-gateway --output json 2>/dev/null | jq -r '.service_principal_client_id') && \
-		databricks grants update catalog $(TRACE_CATALOG) --json "{\"changes\":[{\"add\":[\"USE_CATALOG\"],\"principal\":\"$$SP_ID\"}]}" >/dev/null 2>&1 || true
-	@echo "Deploying apps..."
-	@databricks apps deploy $(PREFIX)-a2a-gateway --source-code-path $(BUNDLE_PATH)/gateway --no-wait >/dev/null 2>&1 || true
-	@databricks apps deploy $(PREFIX)-echo-agent --source-code-path $(BUNDLE_PATH)/src/agents/echo --no-wait >/dev/null 2>&1 || true
-	@databricks apps deploy $(PREFIX)-calculator-agent --source-code-path $(BUNDLE_PATH)/src/agents/calculator --no-wait >/dev/null 2>&1 || true
-	@echo "Starting apps..."
-	@databricks apps start $(PREFIX)-a2a-gateway --no-wait >/dev/null 2>&1 || true
-	@databricks apps start $(PREFIX)-echo-agent --no-wait >/dev/null 2>&1 || true
-	@databricks apps start $(PREFIX)-calculator-agent --no-wait >/dev/null 2>&1 || true
-	@echo "Waiting for apps to be running..."
-	@for i in 1 2 3 4 5 6 7 8 9 10 11 12; do \
-		sleep 10; \
-		GW_STATE=$$(databricks apps get $(PREFIX)-a2a-gateway --output json 2>/dev/null | jq -r '.compute_status.state // "PENDING"'); \
-		ECHO_STATE=$$(databricks apps get $(PREFIX)-echo-agent --output json 2>/dev/null | jq -r '.compute_status.state // "PENDING"'); \
-		CALC_STATE=$$(databricks apps get $(PREFIX)-calculator-agent --output json 2>/dev/null | jq -r '.compute_status.state // "PENDING"'); \
-		echo "  gateway: $$GW_STATE, echo: $$ECHO_STATE, calculator: $$CALC_STATE"; \
-		if [ "$$GW_STATE" = "ACTIVE" ] && [ "$$ECHO_STATE" = "ACTIVE" ] && [ "$$CALC_STATE" = "ACTIVE" ]; then \
-			echo "✅ All apps running!"; \
-			break; \
-		fi; \
-		if [ $$i -eq 12 ]; then \
-			echo "⚠️  Timeout waiting for apps. Run 'make status' to check."; \
-		fi; \
-	done
+	@if [ -z "$(ENTRA_TENANT_ID)" ]; then echo "Error: Set ENTRA_TENANT_ID in config/.env"; exit 1; fi
+	@if [ -z "$(DATABRICKS_HOST)" ]; then echo "Error: Set DATABRICKS_HOST in config/.env"; exit 1; fi
+	@if [ -z "$(DATABRICKS_WORKSPACE_ID)" ]; then echo "Error: Set DATABRICKS_WORKSPACE_ID in config/.env"; exit 1; fi
+	@if [ -z "$(APIM_PUBLISHER_EMAIL)" ]; then echo "Error: Set APIM_PUBLISHER_EMAIL in config/.env"; exit 1; fi
+	cd infra && terraform init
+	cd infra && terraform apply \
+		-var="entra_tenant_id=$(ENTRA_TENANT_ID)" \
+		-var="databricks_host=$(DATABRICKS_HOST)" \
+		-var="databricks_workspace_id=$(DATABRICKS_WORKSPACE_ID)" \
+		-var="apim_publisher_email=$(APIM_PUBLISHER_EMAIL)" \
+		-var="environment=$(ENVIRONMENT)" \
+		-var="location=$(LOCATION)"
 	@$(MAKE) status
 
-status:
-	@databricks apps get $(PREFIX)-a2a-gateway --output json 2>/dev/null | jq -r '"gateway: \(.compute_status.state) - \(.url)"' || echo "gateway: not found"
-	@databricks apps get $(PREFIX)-echo-agent --output json 2>/dev/null | jq -r '"echo: \(.compute_status.state) - \(.url)"' || echo "echo: not found"
-	@databricks apps get $(PREFIX)-calculator-agent --output json 2>/dev/null | jq -r '"calculator: \(.compute_status.state) - \(.url)"' || echo "calculator: not found"
-
-stop:
-	-databricks apps stop $(PREFIX)-a2a-gateway
-	-databricks apps stop $(PREFIX)-echo-agent
-	-databricks apps stop $(PREFIX)-calculator-agent
-
-start:
-	-databricks apps start $(PREFIX)-a2a-gateway --no-wait
-	-databricks apps start $(PREFIX)-echo-agent --no-wait
-	-databricks apps start $(PREFIX)-calculator-agent --no-wait
-
 destroy:
-	databricks bundle destroy --auto-approve
+	cd infra && terraform destroy \
+		-var="entra_tenant_id=$(ENTRA_TENANT_ID)" \
+		-var="databricks_host=$(DATABRICKS_HOST)" \
+		-var="databricks_workspace_id=$(DATABRICKS_WORKSPACE_ID)" \
+		-var="apim_publisher_email=$(APIM_PUBLISHER_EMAIL)"
 
-test:
-	python -m tests.run_tests --prefix $(PREFIX)
+deploy-agents:
+	databricks bundle deploy --var="name_prefix=$(PREFIX)"
+	@echo ""
+	@echo "Agents deployed. Register with: make register-agents USER=user@example.com"
+
+destroy-agents:
+	databricks bundle destroy --var="name_prefix=$(PREFIX)"
+
+# Register the deployed echo and calculator agents automatically
+register-agents:
+	@if [ -z "$(USER)" ]; then echo "Usage: make register-agents USER=user@example.com"; exit 1; fi
+	@echo "Registering deployed agents..."
+	@ECHO_URL=$$(databricks apps list --output json | python3 -c "import sys,json; apps=json.load(sys.stdin).get('apps',[]); url=[a.get('url','') for a in apps if a['name']=='$(PREFIX)-echo-agent']; print(url[0] if url else '')") && \
+	if [ -n "$$ECHO_URL" ]; then \
+		echo "Registering echo agent: $$ECHO_URL"; \
+		python scripts/create_agent_connection.py --name echo --host $$ECHO_URL --base-path /a2a --bearer-token databricks; \
+		databricks grants update connection echo-a2a --json '{"changes":[{"add":["USE_CONNECTION"],"principal":"$(USER)"}]}'; \
+	else \
+		echo "Echo agent not found"; \
+	fi
+	@CALC_URL=$$(databricks apps list --output json | python3 -c "import sys,json; apps=json.load(sys.stdin).get('apps',[]); url=[a.get('url','') for a in apps if a['name']=='$(PREFIX)-calculator-agent']; print(url[0] if url else '')") && \
+	if [ -n "$$CALC_URL" ]; then \
+		echo "Registering calculator agent: $$CALC_URL"; \
+		python scripts/create_agent_connection.py --name calculator --host $$CALC_URL --base-path /a2a --bearer-token databricks; \
+		databricks grants update connection calculator-a2a --json '{"changes":[{"add":["USE_CONNECTION"],"principal":"$(USER)"}]}'; \
+	else \
+		echo "Calculator agent not found"; \
+	fi
+	@echo ""
+	@echo "Done. Test with: make test-agents"
+
+status:
+	@echo ""
+	@echo "=== Gateway ==="
+	@cd infra && terraform output -raw a2a_gateway_base_url 2>/dev/null || echo "  (not deployed)"
+	@echo ""
+	@echo ""
+	@echo "=== Deployed Agents ==="
+	@databricks apps list --output json 2>/dev/null | python3 -c "import sys,json; apps=json.load(sys.stdin).get('apps',[]); [print(f\"  {a['name']}: {a.get('url','(pending)')}\") for a in apps if '$(PREFIX)' in a['name']]" 2>/dev/null || echo "  (none or databricks CLI not configured)"
+	@echo ""
+
+# === Agent Management ===
+
+# Register a Databricks-hosted agent (same tenant, token passthrough)
+register-databricks:
+	@if [ -z "$(NAME)" ]; then echo "Usage: make register-databricks NAME=myagent HOST=https://..."; exit 1; fi
+	@if [ -z "$(HOST)" ]; then echo "Usage: make register-databricks NAME=myagent HOST=https://..."; exit 1; fi
+	python scripts/create_agent_connection.py \
+		--name $(NAME) \
+		--host $(HOST) \
+		--base-path $(or $(BASE_PATH),/a2a) \
+		--bearer-token databricks
+
+# Register an external agent (static token or no auth)
+register-external:
+	@if [ -z "$(NAME)" ]; then echo "Usage: make register-external NAME=myagent HOST=https://... [TOKEN=xxx]"; exit 1; fi
+	@if [ -z "$(HOST)" ]; then echo "Usage: make register-external NAME=myagent HOST=https://... [TOKEN=xxx]"; exit 1; fi
+	python scripts/create_agent_connection.py \
+		--name $(NAME) \
+		--host $(HOST) \
+		--base-path $(or $(BASE_PATH),/.well-known/agent.json) \
+		$(if $(TOKEN),--bearer-token $(TOKEN),)
+
+# Generic register (specify all options)
+register:
+	@if [ -z "$(NAME)" ]; then echo "Usage: make register NAME=x HOST=y [BASE_PATH=z] [TOKEN=t]"; exit 1; fi
+	@if [ -z "$(HOST)" ]; then echo "Usage: make register NAME=x HOST=y [BASE_PATH=z] [TOKEN=t]"; exit 1; fi
+	python scripts/create_agent_connection.py \
+		--name $(NAME) \
+		--host $(HOST) \
+		$(if $(BASE_PATH),--base-path $(BASE_PATH),) \
+		$(if $(TOKEN),--bearer-token $(TOKEN),)
+
+grant:
+	@if [ -z "$(NAME)" ]; then echo "Usage: make grant NAME=myagent USER=user@example.com"; exit 1; fi
+	@if [ -z "$(USER)" ]; then echo "Usage: make grant NAME=myagent USER=user@example.com"; exit 1; fi
+	databricks grants update connection $(NAME)-a2a --json '{"changes":[{"add":["USE_CONNECTION"],"principal":"$(USER)"}]}'
+
+revoke:
+	@if [ -z "$(NAME)" ]; then echo "Usage: make revoke NAME=myagent USER=user@example.com"; exit 1; fi
+	@if [ -z "$(USER)" ]; then echo "Usage: make revoke NAME=myagent USER=user@example.com"; exit 1; fi
+	databricks grants update connection $(NAME)-a2a --json '{"changes":[{"remove":["USE_CONNECTION"],"principal":"$(USER)"}]}'
+
+# === Auth ===
+
+token:
+	@az account get-access-token --resource https://management.azure.com --query accessToken -o tsv
+
+# === Testing ===
+
+test: test-unit test-compliance
 
 test-unit:
-	python -m pytest tests/unit/ -v
+	pytest tests/unit/ -v
 
-.PHONY: deploy status stop start destroy auth test test-unit
+test-integration:
+	@GATEWAY_URL=$$(cd infra && terraform output -raw a2a_gateway_base_url) && \
+	APIM_GATEWAY_URL=$$GATEWAY_URL DATABRICKS_TOKEN=$$($(MAKE) -s token) pytest tests/integration/ -v
+
+test-compliance:
+	python scripts/test_agent_card_compliance.py --mock
+
+test-agents:
+	@GATEWAY_URL=$$(cd infra && terraform output -raw a2a_gateway_base_url 2>/dev/null) && \
+	TOKEN=$$(az account get-access-token --resource https://management.azure.com --query accessToken -o tsv) && \
+	echo "Gateway: $$GATEWAY_URL" && \
+	echo "" && \
+	echo "=== List Agents ===" && \
+	curl -s -H "Authorization: Bearer $$TOKEN" "$$GATEWAY_URL/agents" | python3 -m json.tool && \
+	echo "" && \
+	echo "=== Echo Agent ===" && \
+	curl -s -X POST "$$GATEWAY_URL/agents/echo" \
+		-H "Authorization: Bearer $$TOKEN" \
+		-H "Content-Type: application/json" \
+		-d '{"jsonrpc":"2.0","id":"1","method":"message/send","params":{"message":{"role":"user","parts":[{"type":"text","text":"Hello!"}]}}}' | python3 -m json.tool && \
+	echo "" && \
+	echo "=== Calculator Agent ===" && \
+	curl -s -X POST "$$GATEWAY_URL/agents/calculator" \
+		-H "Authorization: Bearer $$TOKEN" \
+		-H "Content-Type: application/json" \
+		-d '{"jsonrpc":"2.0","id":"2","method":"message/send","params":{"message":{"role":"user","parts":[{"type":"text","text":"What is 42 + 17?"}]}}}' | python3 -m json.tool

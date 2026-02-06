@@ -16,6 +16,7 @@ For more on AI Agent Protocols, see: [A Survey of AI Agent Protocols](https://ar
 | **Terraform** | Infrastructure-as-code for deploying APIM + App Insights |
 | **Scripts** | CLI tools for creating UC connections and generating agent cards |
 | **Integration Guides** | Docs for Foundry and Copilot Studio |
+| **Sample Agents** | Echo and Calculator agents for testing (Databricks Apps) |
 
 ## Architecture
 
@@ -41,81 +42,62 @@ For more on AI Agent Protocols, see: [A Survey of AI Agent Protocols](https://ar
 | **Auth Flow** | Entra ID token → APIM validates → exchanges for Databricks token → UC check |
 | **Agent Cards** | Generated dynamically from UC connection metadata (A2A spec compliant) |
 
-## Prerequisites
-
-- Azure CLI logged in (`az login`)
-- Databricks CLI configured (`databricks auth login`)
-- Terraform installed
-- Databricks workspace federated with your Entra ID tenant
-
 ## Quick Start
 
-### 1. Deploy
+### 1. Configure
 
 ```bash
-cd infra/
-
-terraform init
-
-terraform apply \
-  -var="entra_tenant_id=YOUR_ENTRA_TENANT_ID" \
-  -var="databricks_host=https://your-workspace.azuredatabricks.net" \
-  -var="databricks_workspace_id=YOUR_WORKSPACE_ID" \
-  -var="apim_publisher_email=you@company.com"
-
-# Get the gateway URL
-export GATEWAY_URL=$(terraform output -raw a2a_gateway_base_url)
-echo $GATEWAY_URL
+cp config/.env.example config/.env
+# Edit config/.env with your values
 ```
 
-### 2. Register an Agent
+### 2. Deploy
 
 ```bash
-# Create UC connection pointing to your backend agent
-python scripts/create_agent_connection.py \
-  --name myagent \
-  --host https://your-backend-agent.azurewebsites.net \
-  --base-path /a2a
-
-# Grant yourself access
-databricks grants update connection myagent-a2a \
-  --json '{"changes":[{"add":["USE_CONNECTION"],"principal":"you@company.com"}]}'
+make deploy          # Deploy APIM gateway
+make deploy-agents   # Deploy echo/calculator agents
 ```
 
-### 3. Get a Token
+### 3. Register & Grant Access
 
 ```bash
-export TOKEN=$(az account get-access-token \
-  --resource https://management.azure.com \
-  --query accessToken -o tsv)
+make register-agents USER=marcin.jimenez@databricks.com
 ```
 
 ### 4. Test
 
 ```bash
-# List agents you have access to
-curl -s -H "Authorization: Bearer $TOKEN" "$GATEWAY_URL/agents" | jq
-
-# Get agent card
-curl -s -H "Authorization: Bearer $TOKEN" \
-  "$GATEWAY_URL/agents/myagent/.well-known/agent.json" | jq
-
-# Send a message
-curl -s -X POST "$GATEWAY_URL/agents/myagent" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": "1",
-    "method": "message/send",
-    "params": {
-      "message": {
-        "role": "user",
-        "parts": [{"type": "text", "text": "Hello!"}]
-      }
-    }
-  }' | jq
+make test-agents
 ```
+
+## Registering Other Agents
+
+```bash
+# External agent (Foundry, third-party A2A services)
+make register-external NAME=foundry-agent HOST=https://foundry-agent.example.com
+
+# External agent with static bearer token
+make register-external NAME=external HOST=https://api.example.com TOKEN=secret-token
+
+# Custom registration (specify all options)
+make register NAME=custom HOST=https://... BASE_PATH=/api/v1/a2a TOKEN=xxx
+```
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `make deploy` | Deploy APIM gateway |
+| `make deploy-agents` | Deploy echo/calculator sample agents |
+| `make register-agents USER=x` | Register deployed agents + grant access |
+| `make test-agents` | Test echo and calculator via gateway |
+| `make status` | Show gateway URL and agent URLs |
+| `make destroy` | Tear down APIM infrastructure |
+| `make destroy-agents` | Tear down Databricks agents |
+| `make register-databricks NAME=x HOST=y` | Register Databricks agent (token passthrough) |
+| `make register-external NAME=x HOST=y` | Register external agent |
+| `make grant NAME=x USER=y` | Grant access to user |
+| `make revoke NAME=x USER=y` | Revoke access |
 
 ## Gateway Endpoints
 
@@ -126,34 +108,6 @@ curl -s -X POST "$GATEWAY_URL/agents/myagent" \
 | `/agents/{name}/.well-known/agent.json` | GET | Get A2A agent card |
 | `/agents/{name}` | POST | A2A JSON-RPC proxy |
 | `/agents/{name}/stream` | POST | A2A streaming (SSE) |
-
-## Grant/Revoke Access
-
-```bash
-# Grant access
-databricks grants update connection myagent-a2a \
-  --json '{"changes":[{"add":["USE_CONNECTION"],"principal":"user@company.com"}]}'
-
-# Revoke access
-databricks grants update connection myagent-a2a \
-  --json '{"changes":[{"remove":["USE_CONNECTION"],"principal":"user@company.com"}]}'
-```
-
-## Testing
-
-```bash
-# Install test dependencies
-pip install -r tests/requirements.txt
-
-# Run unit tests
-pytest tests/unit/
-
-# Run integration tests
-APIM_GATEWAY_URL=$GATEWAY_URL DATABRICKS_TOKEN=$TOKEN pytest tests/integration/
-
-# Test agent card compliance
-python scripts/test_agent_card_compliance.py --mock
-```
 
 ## Integration Guides
 
