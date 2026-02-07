@@ -1,62 +1,100 @@
-PREFIX ?= marcin
-BUNDLE_PATH ?= /Workspace/Users/marcin.jimenez@databricks.com/.bundle/a2a-gateway/dev/files
-TRACE_CATALOG ?= marcin_demo
+# Databricks Agent Interoperability Framework
+# MCP + Unity Catalog
 
-auth:
-	databricks auth login
+# Load environment variables from .env
+ifneq (,$(wildcard .env))
+    include .env
+    export
+endif
 
-deploy:
-	databricks bundle deploy
-	@echo "Granting USE_CATALOG on $(TRACE_CATALOG) to gateway service principal..."
-	@SP_ID=$$(databricks apps get $(PREFIX)-a2a-gateway --output json 2>/dev/null | jq -r '.service_principal_client_id') && \
-		databricks grants update catalog $(TRACE_CATALOG) --json "{\"changes\":[{\"add\":[\"USE_CATALOG\"],\"principal\":\"$$SP_ID\"}]}" >/dev/null 2>&1 || true
-	@echo "Deploying apps..."
-	@databricks apps deploy $(PREFIX)-a2a-gateway --source-code-path $(BUNDLE_PATH)/gateway --no-wait >/dev/null 2>&1 || true
-	@databricks apps deploy $(PREFIX)-echo-agent --source-code-path $(BUNDLE_PATH)/src/agents/echo --no-wait >/dev/null 2>&1 || true
-	@databricks apps deploy $(PREFIX)-calculator-agent --source-code-path $(BUNDLE_PATH)/src/agents/calculator --no-wait >/dev/null 2>&1 || true
-	@echo "Starting apps..."
-	@databricks apps start $(PREFIX)-a2a-gateway --no-wait >/dev/null 2>&1 || true
-	@databricks apps start $(PREFIX)-echo-agent --no-wait >/dev/null 2>&1 || true
-	@databricks apps start $(PREFIX)-calculator-agent --no-wait >/dev/null 2>&1 || true
-	@echo "Waiting for apps to be running..."
-	@for i in 1 2 3 4 5 6 7 8 9 10 11 12; do \
-		sleep 10; \
-		GW_STATE=$$(databricks apps get $(PREFIX)-a2a-gateway --output json 2>/dev/null | jq -r '.compute_status.state // "PENDING"'); \
-		ECHO_STATE=$$(databricks apps get $(PREFIX)-echo-agent --output json 2>/dev/null | jq -r '.compute_status.state // "PENDING"'); \
-		CALC_STATE=$$(databricks apps get $(PREFIX)-calculator-agent --output json 2>/dev/null | jq -r '.compute_status.state // "PENDING"'); \
-		echo "  gateway: $$GW_STATE, echo: $$ECHO_STATE, calculator: $$CALC_STATE"; \
-		if [ "$$GW_STATE" = "ACTIVE" ] && [ "$$ECHO_STATE" = "ACTIVE" ] && [ "$$CALC_STATE" = "ACTIVE" ]; then \
-			echo "✅ All apps running!"; \
-			break; \
-		fi; \
-		if [ $$i -eq 12 ]; then \
-			echo "⚠️  Timeout waiting for apps. Run 'make status' to check."; \
-		fi; \
-	done
-	@$(MAKE) status
+# Defaults (can be overridden by .env)
+UC_CATALOG ?= mcp_agents
+UC_SCHEMA ?= tools
 
-status:
-	@databricks apps get $(PREFIX)-a2a-gateway --output json 2>/dev/null | jq -r '"gateway: \(.compute_status.state) - \(.url)"' || echo "gateway: not found"
-	@databricks apps get $(PREFIX)-echo-agent --output json 2>/dev/null | jq -r '"echo: \(.compute_status.state) - \(.url)"' || echo "echo: not found"
-	@databricks apps get $(PREFIX)-calculator-agent --output json 2>/dev/null | jq -r '"calculator: \(.compute_status.state) - \(.url)"' || echo "calculator: not found"
+# =============================================================================
+# Setup
+# =============================================================================
 
-stop:
-	-databricks apps stop $(PREFIX)-a2a-gateway
-	-databricks apps stop $(PREFIX)-echo-agent
-	-databricks apps stop $(PREFIX)-calculator-agent
+setup:
+	@if [ ! -f .env ]; then \
+		cp .env.example .env; \
+		echo "Created .env from .env.example - please edit with your values"; \
+	else \
+		echo ".env already exists"; \
+	fi
 
-start:
-	-databricks apps start $(PREFIX)-a2a-gateway --no-wait
-	-databricks apps start $(PREFIX)-echo-agent --no-wait
-	-databricks apps start $(PREFIX)-calculator-agent --no-wait
+check-env:
+	@if [ -z "$(DATABRICKS_HOST)" ]; then \
+		echo "Error: DATABRICKS_HOST not set. Run 'make setup' and edit .env"; \
+		exit 1; \
+	fi
+	@echo "Environment OK: $(DATABRICKS_HOST)"
 
-destroy:
-	databricks bundle destroy --auto-approve
+# =============================================================================
+# Infrastructure
+# =============================================================================
 
-test:
-	python -m tests.run_tests --prefix $(PREFIX)
+deploy-infra:
+	cd infra && make deploy
 
-test-unit:
-	python -m pytest tests/unit/ -v
+destroy-infra:
+	cd infra && make destroy
 
-.PHONY: deploy status stop start destroy auth test test-unit
+# =============================================================================
+# UC Functions
+# =============================================================================
+
+register-functions: check-env
+	@echo "Import and run in Databricks: notebooks/register_uc_functions.py"
+	@echo "Or run: make generate-sql | databricks sql execute"
+
+generate-sql:
+	@python -c "from src.mcp.functions import generate_registration_sql; print(generate_registration_sql('$(UC_CATALOG)', '$(UC_SCHEMA)'))"
+
+list-functions:
+	@python -c "from src.mcp.functions import FunctionRegistry; r = FunctionRegistry('$(UC_CATALOG)', '$(UC_SCHEMA)'); [print(f\"  {f['name']}: {f['description']}\") for f in r.list_functions()]"
+
+# =============================================================================
+# Testing
+# =============================================================================
+
+test-echo: check-env
+	@echo "Testing echo function via MCP..."
+	@TOKEN=$$(databricks auth token --host $(DATABRICKS_HOST) | jq -r '.access_token') && \
+	curl -s -X POST "$(DATABRICKS_HOST)/api/2.0/mcp/functions/$(UC_CATALOG)/$(UC_SCHEMA)/echo" \
+		-H "Authorization: Bearer $$TOKEN" \
+		-H "Content-Type: application/json" \
+		-d '{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"echo","arguments":{"message":"Hello from MCP!"}}}' | jq
+
+test-calculator: check-env
+	@echo "Testing calculator function via MCP..."
+	@TOKEN=$$(databricks auth token --host $(DATABRICKS_HOST) | jq -r '.access_token') && \
+	curl -s -X POST "$(DATABRICKS_HOST)/api/2.0/mcp/functions/$(UC_CATALOG)/$(UC_SCHEMA)/calculator" \
+		-H "Authorization: Bearer $$TOKEN" \
+		-H "Content-Type: application/json" \
+		-d '{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"calculator","arguments":{"expression":"2 + 2"}}}' | jq
+
+test: test-echo test-calculator
+
+# =============================================================================
+# Development
+# =============================================================================
+
+install:
+	pip install -e ".[dev]"
+
+unit-test:
+	python -m pytest tests/ -v
+
+lint:
+	python -m ruff check src/ tests/
+
+format:
+	python -m ruff format src/ tests/
+
+clean:
+	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+	find . -type d -name .pytest_cache -exec rm -rf {} + 2>/dev/null || true
+	find . -type f -name "*.pyc" -delete 2>/dev/null || true
+
+.PHONY: setup check-env deploy-infra destroy-infra register-functions generate-sql list-functions test-echo test-calculator test install unit-test lint format clean

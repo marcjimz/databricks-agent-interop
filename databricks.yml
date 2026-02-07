@@ -1,66 +1,18 @@
 bundle:
-  name: a2a-gateway
+  name: databricks-agent-interop
 
 variables:
-  name_prefix:
-    description: "Prefix for all resource names"
-    default: "marcin"
-  trace_catalog:
-    description: "Existing Unity Catalog for trace storage (must already exist)"
-    default: "marcin_demo"
+  catalog:
+    description: "Unity Catalog for MCP tools"
+    default: "mcp_agents"
+  schema:
+    description: "Schema for MCP tool functions"
+    default: "tools"
 
 sync:
   include:
     - notebooks/*
-
-resources:
-  # MLflow experiment for viewing traces in the UI
-  experiments:
-    a2a_gateway_traces:
-      name: "/Shared/a2a-gateway-traces"
-      permissions:
-        - service_principal_name: "${resources.apps.a2a_gateway.service_principal_client_id}"
-          level: CAN_MANAGE
-
-  # Unity Catalog schema for trace storage
-  # NOTE: The catalog must already exist. Set trace_catalog variable to specify which catalog to use.
-  # After deployment, grant USE_CATALOG to the app's service principal:
-  #   SP_ID=$(databricks apps get ${var.name_prefix}-a2a-gateway --output json | jq -r '.service_principal_client_id')
-  #   databricks grants update catalog ${var.trace_catalog} --json "{\"changes\":[{\"add\":[\"USE_CATALOG\"],\"principal\":\"${SP_ID}\"}]}"
-  schemas:
-    gateway_schema:
-      name: "a2a_gateway"
-      catalog_name: "${var.trace_catalog}"
-      comment: "Schema for A2A Gateway traces and metadata"
-      grants:
-        - principal: "${resources.apps.a2a_gateway.service_principal_client_id}"
-          privileges:
-            - USE_SCHEMA
-            - CREATE_TABLE
-            - SELECT
-            - MODIFY
-
-  apps:
-    a2a_gateway:
-      name: "${var.name_prefix}-a2a-gateway"
-      description: "A2A Gateway for agent discovery and proxying"
-      source_code_path: ./gateway
-
-    echo_agent:
-      name: "${var.name_prefix}-echo-agent"
-      description: "Echo Agent for A2A testing"
-      source_code_path: ./src/agents/echo
-
-    calculator_agent:
-      name: "${var.name_prefix}-calculator-agent"
-      description: "Calculator Agent for A2A demo"
-      source_code_path: ./src/agents/calculator
-
-    # Uncomment to deploy the Assistant Agent (requires available app slots)
-    # assistant_agent:
-    #   name: "${var.name_prefix}-assistant-agent"
-    #   description: "Assistant Agent - orchestrates other A2A agents"
-    #   source_code_path: ./src/agents/assistant
+    - src/**/*.py
 
 targets:
   dev:
