@@ -4,6 +4,24 @@
 
 A framework for **agent interoperability** on Databricks, where **Unity Catalog** is the heart for discovery, governance, and traceability. Wrap any agent—internal or external—as a UC Function and expose it via **MCP (Model Context Protocol)** for seamless access across platforms.
 
+## Prerequisites
+
+| Tool | Installation |
+|------|--------------|
+| Terraform | https://terraform.io/downloads |
+| Azure CLI | https://aka.ms/installazurecli |
+| Databricks CLI | `pip install databricks-cli` |
+| Python 3.10+ | https://python.org |
+
+```bash
+# Verify installations
+terraform --version
+az --version
+databricks --version
+```
+
+---
+
 ## Three Pillars
 
 | Pillar | What It Means |
@@ -33,139 +51,122 @@ A framework for **agent interoperability** on Databricks, where **Unity Catalog*
         ▼                       ▼                       ▼
    Databricks              Azure AI                 Any MCP
     Agents                 Foundry                  Client
+
+
+┌─────────────────── UC Functions as Wrappers ───────────────────────┐
+│                                                                     │
+│   ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐│
+│   │   echo_agent    │    │calculator_agent │    │epic_patient_    ││
+│   │   (UC Func)     │    │   (UC Func)     │    │search (UC Func) ││
+│   └────────┬────────┘    └────────┬────────┘    └────────┬────────┘│
+│            │                      │                      │          │
+│            ▼                      ▼                      ▼          │
+│   ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐│
+│   │  Echo Agent     │    │Calculator Agent │    │  Epic FHIR      ││
+│   │ (Databricks App)│    │(Databricks App) │    │  (Stub API)     ││
+│   │ ResponsesAgent  │    │ ResponsesAgent  │    │                 ││
+│   └─────────────────┘    └─────────────────┘    └─────────────────┘│
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## Step 0: Configure Environment
 
-Create your configuration file before running any commands.
+Create your configuration file before deploying infrastructure.
 
 ```bash
 # Create .env from template
 make setup
 
-# Edit .env with your values
+# Edit .env with your Azure values
 ```
 
 ### .env Configuration
 
 ```bash
-# Required
+# Required for infrastructure deployment
 TENANT_ID=your-azure-tenant-id
 SUBSCRIPTION_ID=your-azure-subscription-id
-DATABRICKS_HOST=https://your-workspace.azuredatabricks.net
+LOCATION=eastus2
+PREFIX=mcp-interop
 
 # Unity Catalog
 UC_CATALOG=mcp_agents
 UC_SCHEMA=tools
 
-# Optional - for metastore assignment
-DATABRICKS_ACCOUNT_ID=your-databricks-account-id
-UC_METASTORE_ID=your-metastore-id
-
-# Optional - for Foundry integration
-FOUNDRY_ENDPOINT=https://your-foundry.azure.com
-
-# Infrastructure
-LOCATION=eastus2
+# Set automatically after deployment (Step 1)
+# DATABRICKS_HOST=https://adb-xxxx.azuredatabricks.net
+# FOUNDRY_ENDPOINT=https://your-foundry.azure.com
 ```
+
+After infrastructure deployment, `DATABRICKS_HOST` and `FOUNDRY_ENDPOINT` are automatically added to your `.env` file.
 
 ---
 
 ## Step 1: Deploy Infrastructure
 
-Deploy Azure Databricks workspace and Azure AI Foundry.
+Infrastructure deployment is split into two phases to handle cross-tenant metastore scenarios.
+
+### Phase 1: Deploy Azure Resources
 
 ```bash
-# Deploy Azure resources
 make deploy-infra
-
-# Or with Unity Catalog metastore assignment
-make deploy-infra-uc
 ```
 
-### What Gets Deployed
+This deploys:
 
 | Resource | Purpose |
 |----------|---------|
-| Azure Databricks Workspace | Premium SKU with Unity Catalog |
-| Azure AI Foundry | AI Hub + AI Services |
-| Unity Catalog | `mcp_agents.tools` schema |
-| SQL Warehouse | Serverless for function execution |
+| Azure Databricks Workspace | Premium SKU for Unity Catalog |
+| Azure AI Foundry | AI Hub + AI Services + Project |
+| Storage Accounts | For Unity Catalog and AI Foundry |
+| Access Connector | Managed identity for UC storage access |
+
+After deployment, your `.env` is updated with:
+- `DATABRICKS_HOST` — Your workspace URL
+- `FOUNDRY_ENDPOINT` — Your AI Foundry endpoint
+
+### Phase 2: Assign Metastore (Manual)
+
+1. Go to [Databricks Account Console](https://accounts.azuredatabricks.net)
+2. Navigate to **Data** → **Metastores**
+3. Select your metastore and click **Assign to workspace**
+4. Choose the newly created workspace (`dbx-mcp-interop`)
+
+### Phase 3: Deploy Unity Catalog Resources
+
+After metastore assignment:
+
+```bash
+make deploy-uc
+```
+
+This creates:
+
+| Resource | Purpose |
+|----------|---------|
+| Storage Credential | Links Access Connector to UC |
+| External Location | Points to ADLS storage |
+| Catalog `mcp_agents` | Container for MCP tools |
+| Schema `mcp_agents.tools` | Where UC Functions live |
+
+The `make deploy-uc` command also deploys a notebook to your workspace via Databricks Asset Bundles. After running it, you'll see a URL to open the notebook.
 
 ---
 
 ## Step 2: Register UC Functions as MCP Tools
 
-UC Functions become MCP tools automatically via Databricks managed MCP servers.
+Open the notebook URL provided by `make deploy-uc` and run all cells. This registers the UC Functions which automatically become MCP tools.
 
-### Option A: Run the Notebook
+The notebook registers:
 
-Import and run in Databricks:
-
-```
-notebooks/register_uc_functions.py
-```
-
-### Option B: Generate and Run SQL
-
-```bash
-# Generate registration SQL
-make generate-sql
-
-# View available functions
-make list-functions
-```
-
-### Option C: Run SQL Directly
-
-```sql
--- Create catalog and schema
-CREATE CATALOG IF NOT EXISTS mcp_agents;
-CREATE SCHEMA IF NOT EXISTS mcp_agents.tools;
-
--- Register echo function
-CREATE OR REPLACE FUNCTION mcp_agents.tools.echo(
-    message STRING COMMENT 'Message to echo back'
-)
-RETURNS STRING
-LANGUAGE PYTHON
-COMMENT 'MCP Tool: Echo back the input message'
-AS $$
-import json
-from datetime import datetime
-
-return json.dumps({
-    "echo": message,
-    "timestamp": datetime.now().isoformat(),
-    "source": "UC Function via Databricks Managed MCP"
-})
-$$;
-
--- Register calculator function
-CREATE OR REPLACE FUNCTION mcp_agents.tools.calculator(
-    expression STRING COMMENT 'Mathematical expression (e.g., "2 + 2")'
-)
-RETURNS STRING
-LANGUAGE PYTHON
-COMMENT 'MCP Tool: Evaluate mathematical expressions'
-AS $$
-import json
-import re
-from datetime import datetime
-
-if not re.match(r'^[0-9+\-*/().\\s]+$', expression):
-    return json.dumps({"error": "Invalid expression"})
-
-result = eval(expression)
-return json.dumps({
-    "expression": expression,
-    "result": result,
-    "timestamp": datetime.now().isoformat()
-})
-$$;
-```
+| Function | Description |
+|----------|-------------|
+| `echo_agent` | Calls the Echo Agent (Databricks App) via MLflow `/invocations` endpoint |
+| `calculator_agent` | Calls the Calculator Agent (Databricks App) via MLflow `/invocations` endpoint |
+| `epic_patient_search` | FHIR Patient search stub (simulates Epic Sandbox API) |
 
 ### Verify Registration
 
@@ -180,24 +181,31 @@ SHOW FUNCTIONS IN mcp_agents.tools;
 ### 3a. SQL
 
 ```sql
--- Test echo
-SELECT mcp_agents.tools.echo('Hello from Databricks!');
+-- Test echo agent (requires agent to be running)
+SELECT mcp_agents.tools.echo_agent('Hello from Databricks!');
 
--- Test calculator
-SELECT mcp_agents.tools.calculator('2 + 2');
-SELECT mcp_agents.tools.calculator('(10 + 5) * 3');
+-- Test calculator agent (requires agent to be running)
+SELECT mcp_agents.tools.calculator_agent('add 5 and 3');
+SELECT mcp_agents.tools.calculator_agent('multiply 10 by 4');
+
+-- Test Epic FHIR stub (always works - local stub data)
+SELECT mcp_agents.tools.epic_patient_search('Argonaut', 'Jason', NULL);
+SELECT mcp_agents.tools.epic_patient_search('Smith', NULL, NULL);
 ```
 
 ### 3b. Makefile
 
 ```bash
-# Test echo via MCP
+# Test echo agent via MCP
 make test-echo
 
-# Test calculator via MCP
+# Test calculator agent via MCP
 make test-calculator
 
-# Test both
+# Test Epic FHIR stub via MCP
+make test-fhir
+
+# Test all
 make test
 ```
 
@@ -208,12 +216,16 @@ from src.agents.databricks import DatabricksMCPAgent
 
 agent = DatabricksMCPAgent(catalog="mcp_agents", schema="tools")
 
-# Test echo
-result = agent.echo("Hello from Python!")
+# Call echo agent
+result = agent.call_function("echo_agent", message="Hello from Python!")
 print(result)
 
-# Test calculator
-result = agent.call_function("calculator", expression="100 / 4")
+# Call calculator agent
+result = agent.call_function("calculator_agent", expression="add 10 and 5")
+print(result)
+
+# Search Epic FHIR (stub)
+result = agent.call_function("epic_patient_search", family_name="Argonaut")
 print(result)
 ```
 
@@ -223,26 +235,37 @@ print(result)
 # Get token
 TOKEN=$(databricks auth token | jq -r '.access_token')
 
-# Call echo
-curl -X POST "${DATABRICKS_HOST}/api/2.0/mcp/functions/mcp_agents/tools/echo" \
+# Call echo agent
+curl -X POST "${DATABRICKS_HOST}/api/2.0/mcp/functions/mcp_agents/tools/echo_agent" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
     "id": "1",
     "method": "tools/call",
-    "params": {"name": "echo", "arguments": {"message": "Hello via MCP!"}}
+    "params": {"name": "echo_agent", "arguments": {"message": "Hello via MCP!"}}
   }'
 
-# Call calculator
-curl -X POST "${DATABRICKS_HOST}/api/2.0/mcp/functions/mcp_agents/tools/calculator" \
+# Call calculator agent
+curl -X POST "${DATABRICKS_HOST}/api/2.0/mcp/functions/mcp_agents/tools/calculator_agent" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
     "id": "1",
     "method": "tools/call",
-    "params": {"name": "calculator", "arguments": {"expression": "25 * 4"}}
+    "params": {"name": "calculator_agent", "arguments": {"expression": "multiply 25 by 4"}}
+  }'
+
+# Search Epic FHIR (stub)
+curl -X POST "${DATABRICKS_HOST}/api/2.0/mcp/functions/mcp_agents/tools/epic_patient_search" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": "1",
+    "method": "tools/call",
+    "params": {"name": "epic_patient_search", "arguments": {"family_name": "Argonaut"}}
   }'
 ```
 
@@ -266,12 +289,16 @@ tools = client.list_tools()
 for t in tools:
     print(f"  {t['name']}: {t.get('description', '')}")
 
-# Call echo
-result = client.call_tool("echo", {"message": "Hello from Foundry!"})
+# Call echo agent
+result = client.call_tool("echo_agent", {"message": "Hello from Foundry!"})
 print(result.content)
 
-# Call calculator
-result = client.call_tool("calculator", {"expression": "15 + 27"})
+# Call calculator agent
+result = client.call_tool("calculator_agent", {"expression": "add 15 and 27"})
+print(result.content)
+
+# Search patients
+result = client.call_tool("epic_patient_search", {"family_name": "Argonaut"})
 print(result.content)
 ```
 
@@ -283,11 +310,17 @@ TOKEN=$(az account get-access-token \
   --resource 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d \
   -o tsv --query accessToken)
 
-# Call echo
-curl -X POST "https://<workspace>.azuredatabricks.net/api/2.0/mcp/functions/mcp_agents/tools/echo" \
+# Call echo agent
+curl -X POST "https://<workspace>.azuredatabricks.net/api/2.0/mcp/functions/mcp_agents/tools/echo_agent" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"echo","arguments":{"message":"Hello from Foundry!"}}}'
+  -d '{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"echo_agent","arguments":{"message":"Hello from Foundry!"}}}'
+
+# Search Epic FHIR (stub)
+curl -X POST "https://<workspace>.azuredatabricks.net/api/2.0/mcp/functions/mcp_agents/tools/epic_patient_search" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"epic_patient_search","arguments":{"family_name":"Smith"}}}'
 ```
 
 ---
@@ -300,20 +333,21 @@ Unity Catalog enforces who can execute MCP tools.
 
 ```sql
 -- Grant to a user
-GRANT EXECUTE ON FUNCTION mcp_agents.tools.echo TO `alice@company.com`;
-GRANT EXECUTE ON FUNCTION mcp_agents.tools.calculator TO `alice@company.com`;
+GRANT EXECUTE ON FUNCTION mcp_agents.tools.echo_agent TO `alice@company.com`;
+GRANT EXECUTE ON FUNCTION mcp_agents.tools.calculator_agent TO `alice@company.com`;
+GRANT EXECUTE ON FUNCTION mcp_agents.tools.epic_patient_search TO `alice@company.com`;
 
 -- Grant to a group
-GRANT EXECUTE ON FUNCTION mcp_agents.tools.echo TO `data-science-team`;
+GRANT EXECUTE ON FUNCTION mcp_agents.tools.echo_agent TO `data-science-team`;
 
 -- Grant to a service principal
-GRANT EXECUTE ON FUNCTION mcp_agents.tools.calculator TO `my-app-sp`;
+GRANT EXECUTE ON FUNCTION mcp_agents.tools.epic_patient_search TO `my-app-sp`;
 ```
 
 ### Revoke Access
 
 ```sql
-REVOKE EXECUTE ON FUNCTION mcp_agents.tools.calculator FROM `intern-group`;
+REVOKE EXECUTE ON FUNCTION mcp_agents.tools.calculator_agent FROM `intern-group`;
 ```
 
 ### View Permissions
@@ -403,9 +437,9 @@ Once registered, UC Functions are automatically available as MCP tools.
 
 | Tool | Endpoint |
 |------|----------|
-| `echo` | `/api/2.0/mcp/functions/mcp_agents/tools/echo` |
-| `calculator` | `/api/2.0/mcp/functions/mcp_agents/tools/calculator` |
-| `call_foundry_agent` | `/api/2.0/mcp/functions/mcp_agents/tools/call_foundry_agent` |
+| `echo_agent` | `/api/2.0/mcp/functions/mcp_agents/tools/echo_agent` |
+| `calculator_agent` | `/api/2.0/mcp/functions/mcp_agents/tools/calculator_agent` |
+| `epic_patient_search` | `/api/2.0/mcp/functions/mcp_agents/tools/epic_patient_search` |
 
 ### From a Databricks Agent
 
@@ -414,11 +448,14 @@ from src.agents.databricks import DatabricksMCPAgent
 
 agent = DatabricksMCPAgent(catalog="mcp_agents", schema="tools")
 
-# Use echo
-response = agent.echo("Hello!")
+# Use echo agent
+response = agent.call_function("echo_agent", message="Hello!")
 
-# Use calculator
-result = agent.call_function("calculator", expression="42 * 2")
+# Use calculator agent
+result = agent.call_function("calculator_agent", expression="add 42 and 2")
+
+# Search patients
+result = agent.call_function("epic_patient_search", family_name="Smith")
 ```
 
 ### From a Foundry Agent
@@ -432,7 +469,8 @@ client = FoundryMCPClient(
     schema="tools"
 )
 
-result = client.call_tool("calculator", {"expression": "100 + 200"})
+result = client.call_tool("calculator_agent", {"expression": "add 100 and 200"})
+result = client.call_tool("epic_patient_search", {"family_name": "Argonaut"})
 ```
 
 ---
@@ -563,9 +601,17 @@ The UC Functions you create (echo, calculator, custom agents) become building bl
           ┌─────────────────┼─────────────────┐
           ▼                 ▼                 ▼
     ┌───────────┐     ┌───────────┐     ┌───────────┐
-    │   echo    │     │calculator │     │  foundry  │
-    │ UC Func   │     │ UC Func   │     │ UC Func   │
-    └───────────┘     └───────────┘     └───────────┘
+    │echo_agent │     │calculator_│     │epic_      │
+    │ UC Func   │     │agent      │     │patient_   │
+    │           │     │ UC Func   │     │search     │
+    └─────┬─────┘     └─────┬─────┘     └───────────┘
+          │                 │                 │
+          ▼                 ▼                 │
+    ┌───────────┐     ┌───────────┐           │
+    │Echo Agent │     │Calculator │    (Stub API)
+    │ DBX App   │     │  DBX App  │
+    │ MLflow    │     │  MLflow   │
+    └───────────┘     └───────────┘
           │                 │                 │
           └─────────────────┴─────────────────┘
                             │
@@ -586,6 +632,17 @@ For detailed setup, see the [Agent Bricks documentation](https://docs.databricks
 ## File Structure
 
 ```
+├── apps/
+│   ├── echo/                     # Echo Agent (Databricks App)
+│   │   ├── agent.py              # MLflow ResponsesAgent implementation
+│   │   ├── start_server.py       # AgentServer startup
+│   │   ├── app.yaml              # Databricks App config
+│   │   └── requirements.txt
+│   └── calculator/               # Calculator Agent (Databricks App)
+│       ├── agent.py              # MLflow ResponsesAgent implementation
+│       ├── start_server.py       # AgentServer startup
+│       ├── app.yaml              # Databricks App config
+│       └── requirements.txt
 ├── src/
 │   ├── agents/
 │   │   ├── databricks/           # Databricks agents using MCP tools
@@ -593,14 +650,14 @@ For detailed setup, see the [Agent Bricks documentation](https://docs.databricks
 │   └── mcp/
 │       └── functions/            # UC Function definitions
 ├── notebooks/
-│   └── register_uc_functions.py  # Register UC Functions in Databricks
+│   └── register_uc_functions.py  # Register UC Functions (wrappers for agents)
 ├── infra/
 │   ├── main.tf                   # Azure Databricks + AI Foundry
 │   └── Makefile
 ├── tests/                        # Unit tests
 ├── .env.example                  # Configuration template
 ├── Makefile                      # Development commands
-└── databricks.yml                # Databricks Asset Bundle config
+└── databricks.yml                # Databricks Asset Bundle config (apps + notebooks)
 ```
 
 ---
@@ -610,12 +667,39 @@ For detailed setup, see the [Agent Bricks documentation](https://docs.databricks
 | Command | Description |
 |---------|-------------|
 | `make setup` | Create .env from template |
-| `make deploy-infra` | Deploy Azure infrastructure |
-| `make generate-sql` | Generate UC Function registration SQL |
-| `make list-functions` | List available MCP tools |
-| `make test-echo` | Test echo function via MCP |
-| `make test-calculator` | Test calculator function via MCP |
+| `make deploy-infra` | Phase 1: Deploy Azure infrastructure (Databricks + Foundry) |
+| `make deploy-uc` | Phase 2: Deploy UC resources + apps + notebook (after metastore assignment) |
+| `make deploy-apps` | Deploy/redeploy A2A agents as Databricks Apps |
+| `make destroy-infra` | Destroy Azure infrastructure |
+| `make test-echo` | Test echo_agent function via MCP |
+| `make test-calculator` | Test calculator_agent function via MCP |
+| `make test-fhir` | Test epic_patient_search function via MCP |
 | `make test` | Run all MCP tests |
+
+---
+
+## Quick Setup: Expose an Agent via MCP
+
+To wrap a Databricks App agent as an MCP tool:
+
+1. **Deploy infrastructure** — `make deploy-infra` then `make deploy-uc`
+2. **Create Service Principal** — Terraform creates `mcp-interop-agent-caller` SP with OAuth secret
+3. **Grant SP permission on app** — `CAN_USE` permission on your Databricks App
+4. **Create HTTP Connection** — OAuth M2M connection using SP credentials from secret scope
+5. **Register UC Function** — SQL function using `http_request()` with the connection
+6. **Call via MCP** — `POST /api/2.0/mcp/functions/{catalog}/{schema}/{function}`
+
+The notebook (`register_uc_functions.py`) handles steps 4-5 automatically after infrastructure is deployed.
+
+---
+
+## Known Limitations
+
+| Limitation | Description | Status |
+|------------|-------------|--------|
+| **OAuth token generation in notebooks** | Notebooks cannot programmatically generate OAuth secrets for Service Principals. Secrets must be created via Terraform/CLI. | Tracked internally |
+| **HTTP Connections block U2M** | UC HTTP Connections using `http_request()` in SQL do not support User-to-Machine (U2M) authentication. Use OAuth M2M (Service Principal) instead. | Platform limitation |
+| **SP permission via CLI** | Granting app permissions to SPs requires using the application_id as `service_principal_name` in API calls. | Workaround documented |
 
 ---
 
@@ -625,4 +709,5 @@ For detailed setup, see the [Agent Bricks documentation](https://docs.databricks
 - [Agent Bricks: Multi-Agent Supervisor](https://docs.databricks.com/aws/en/generative-ai/agent-bricks/multi-agent-supervisor)
 - [Azure AI Foundry MCP](https://learn.microsoft.com/en-us/azure/ai-foundry/agents/how-to/tools-classic/model-context-protocol)
 - [MCP Specification](https://spec.modelcontextprotocol.io/)
+- [Unity Catalog HTTP Connections](https://learn.microsoft.com/en-us/azure/databricks/query-federation/http)
 - [Unity Catalog Audit Logs](https://docs.databricks.com/en/administration-guide/account-settings/audit-logs.html)

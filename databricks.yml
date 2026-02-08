@@ -1,5 +1,5 @@
 bundle:
-  name: databricks-agent-interop
+  name: mcp-agent-interop
 
 variables:
   catalog:
@@ -9,12 +9,25 @@ variables:
     description: "Schema for MCP tool functions"
     default: "tools"
 
+workspace:
+  root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+
 sync:
   include:
-    - notebooks/*
-    - src/**/*.py
+    - notebooks/*.py
+    - notebooks/.env
+
+resources:
+  apps:
+    calculator_agent:
+      name: "calculator-agent"
+      description: "Calculator Agent with SP authentication using MLflow AgentServer"
+      source_code_path: ./apps/calculator
+      permissions:
+        - level: CAN_MANAGE
+          user_name: ${workspace.current_user.userName}
 
 targets:
   dev:
     default: true
-    # Uses default CLI profile. Override with: databricks bundle deploy -p <profile>
+    mode: development

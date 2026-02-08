@@ -25,7 +25,7 @@ def echo(message: str) -> str:
 '''
 
 # Calculator function code
-CALCULATOR_FUNCTION_CODE = '''
+CALCULATOR_FUNCTION_CODE = r'''
 import json
 import re
 from datetime import datetime
@@ -34,7 +34,7 @@ def calculator(expression: str) -> str:
     """Evaluate a mathematical expression safely."""
     try:
         # Only allow safe characters: digits, operators, parentheses, decimals, spaces
-        if not re.match(r'^[0-9+\-*/().\\s]+$', expression):
+        if not re.match(r'^[0-9+\-*/().\s]+$', expression):
             return json.dumps({
                 "error": "Invalid expression. Only numbers and operators (+, -, *, /, parentheses) allowed.",
                 "expression": expression

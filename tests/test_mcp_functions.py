@@ -65,6 +65,16 @@ class TestFunctionRegistry:
         assert "connection_name STRING" in sql
         assert "method STRING" in sql
 
+    def test_calculator_function_sql(self):
+        """Calculator function generates valid SQL."""
+        from src.mcp.functions import CalculatorFunction
+
+        sql = CalculatorFunction.get_registration_sql("mcp_agents", "tools")
+
+        assert "CREATE OR REPLACE FUNCTION mcp_agents.tools.calculator" in sql
+        assert "expression STRING" in sql
+        assert "RETURNS STRING" in sql
+
     def test_mcp_endpoints(self):
         """Registry generates correct MCP endpoints."""
         from src.mcp.functions import FunctionRegistry
@@ -73,5 +83,6 @@ class TestFunctionRegistry:
         endpoints = registry.get_mcp_endpoints("https://workspace.azuredatabricks.net")
 
         assert "echo" in endpoints
+        assert "calculator" in endpoints
         assert "call_foundry_agent" in endpoints
         assert "workspace.azuredatabricks.net/api/2.0/mcp/functions" in endpoints["echo"]
