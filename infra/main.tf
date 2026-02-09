@@ -63,12 +63,12 @@ provider "azuread" {}
 
 variable "location" {
   description = "Azure region for all resources"
-  default     = "eastus2"
+  default     = "westus2"
 }
 
 variable "prefix" {
   description = "Prefix for resource names"
-  default     = "mcp-interop"
+  default     = "mcp-agent-interop"
 }
 
 variable "tenant_id" {
@@ -189,6 +189,23 @@ resource "azurerm_ai_services" "main" {
 
   tags = {
     purpose = "mcp-agent-interoperability"
+  }
+}
+
+# Azure AI Model Deployment (Llama-3.3-70B-Instruct via serverless)
+resource "azurerm_cognitive_deployment" "llama_chat" {
+  name                 = "llama-chat"
+  cognitive_account_id = azurerm_ai_services.main.id
+
+  model {
+    format  = "Meta"
+    name    = "Llama-3.3-70B-Instruct"
+    version = "9"
+  }
+
+  sku {
+    name     = "GlobalStandard"
+    capacity = 1
   }
 }
 
@@ -347,25 +364,77 @@ resource "databricks_secret" "client_id" {
 # The actual secret is created via Databricks API and stored separately
 
 # =============================================================================
+# Azure AD Service Principal for Foundry Access (OAuth M2M)
+# =============================================================================
+# This SP authenticates to Azure AI Services via Entra ID OAuth.
+# UC HTTP Connection uses this for automatic token refresh.
+
+resource "azuread_application" "foundry_caller" {
+  count        = var.deploy_uc ? 1 : 0
+  display_name = "${var.prefix}-foundry-caller"
+
+  owners = [data.azurerm_client_config.current.object_id]
+}
+
+resource "azuread_service_principal" "foundry_caller" {
+  count     = var.deploy_uc ? 1 : 0
+  client_id = azuread_application.foundry_caller[0].client_id
+
+  owners = [data.azurerm_client_config.current.object_id]
+}
+
+resource "azuread_service_principal_password" "foundry_caller" {
+  count                = var.deploy_uc ? 1 : 0
+  service_principal_id = azuread_service_principal.foundry_caller[0].id
+}
+
+# Grant SP "Cognitive Services User" role on AI Services
+resource "azurerm_role_assignment" "foundry_caller_cognitive" {
+  count                = var.deploy_uc ? 1 : 0
+  scope                = azurerm_ai_services.main.id
+  role_definition_name = "Cognitive Services User"
+  principal_id         = azuread_service_principal.foundry_caller[0].object_id
+}
+
+# Store Foundry SP credentials in Databricks secrets
+resource "databricks_secret" "foundry_client_id" {
+  count        = var.deploy_uc ? 1 : 0
+  provider     = databricks.workspace
+  scope        = databricks_secret_scope.oauth[0].name
+  key          = "foundry-client-id"
+  string_value = azuread_application.foundry_caller[0].client_id
+}
+
+resource "databricks_secret" "foundry_client_secret" {
+  count        = var.deploy_uc ? 1 : 0
+  provider     = databricks.workspace
+  scope        = databricks_secret_scope.oauth[0].name
+  key          = "foundry-client-secret"
+  string_value = azuread_service_principal_password.foundry_caller[0].value
+}
+
+# =============================================================================
 # MCP Agents Catalog and Schema
 # =============================================================================
 
 resource "databricks_catalog" "mcp_agents" {
-  count        = var.deploy_uc ? 1 : 0
-  provider     = databricks.workspace
-  name         = "mcp_agents"
-  storage_root = "abfss://${azurerm_storage_container.catalog.name}@${azurerm_storage_account.unity.name}.dfs.core.windows.net/mcp_agents"
-  comment      = "Catalog for MCP agent tools - wraps external agents as UC Functions"
+  count         = var.deploy_uc ? 1 : 0
+  provider      = databricks.workspace
+  name          = "mcp_agents"
+  storage_root  = "abfss://${azurerm_storage_container.catalog.name}@${azurerm_storage_account.unity.name}.dfs.core.windows.net/mcp_agents"
+  comment       = "Catalog for MCP agent tools - wraps external agents as UC Functions"
+  force_destroy = true
 
   depends_on = [databricks_external_location.catalog]
 }
 
 resource "databricks_schema" "tools" {
-  count        = var.deploy_uc ? 1 : 0
-  provider     = databricks.workspace
-  catalog_name = databricks_catalog.mcp_agents[0].name
-  name         = "tools"
-  comment      = "UC Functions exposed as MCP tools via Databricks managed MCP servers"
+  count         = var.deploy_uc ? 1 : 0
+  provider      = databricks.workspace
+  catalog_name  = databricks_catalog.mcp_agents[0].name
+  name          = "tools"
+  comment       = "UC Functions exposed as MCP tools via Databricks managed MCP servers"
+  force_destroy = true
 
   depends_on = [databricks_catalog.mcp_agents]
 }
@@ -397,6 +466,16 @@ output "mcp_functions_endpoint" {
 output "foundry_endpoint" {
   description = "Azure AI Services endpoint"
   value       = azurerm_ai_services.main.endpoint
+}
+
+output "foundry_oauth_token_endpoint" {
+  description = "Azure AD token endpoint for Foundry OAuth M2M"
+  value       = "https://login.microsoftonline.com/${var.tenant_id}/oauth2/v2.0/token"
+}
+
+output "foundry_oauth_scope" {
+  description = "OAuth scope for Azure Cognitive Services"
+  value       = "https://cognitiveservices.azure.com/.default"
 }
 
 output "foundry_hub_id" {

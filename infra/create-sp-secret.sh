@@ -16,8 +16,9 @@
 
 set -euo pipefail
 
-# Configuration
-SP_NAME="mcp-interop-agent-caller"
+# Configuration - SP name uses PREFIX from environment
+PREFIX="${PREFIX:-mcp-agent-interop}"
+SP_NAME="${PREFIX}-agent-caller"
 SECRET_SCOPE="mcp-agent-oauth"
 SECRET_KEY="client-secret"
 
@@ -65,11 +66,23 @@ if [ -n "$EXISTING_SECRET" ]; then
     fi
 fi
 
+# Get access token - try databricks CLI first, fall back to Azure CLI
+echo "Getting access token..."
+TOKEN=$(databricks auth token --host "$DATABRICKS_HOST" 2>/dev/null | jq -r '.access_token')
+if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+    echo "Databricks CLI token failed, trying Azure CLI..."
+    TOKEN=$(az account get-access-token --resource 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d --query accessToken -o tsv 2>/dev/null)
+fi
+if [ -z "$TOKEN" ]; then
+    echo "Error: Could not get access token. Try 'az login' or 'databricks auth login --host $DATABRICKS_HOST'"
+    exit 1
+fi
+
 # Create OAuth secret via API
 echo "Creating OAuth secret for service principal..."
 SECRET_RESPONSE=$(curl -s -X POST \
     "${DATABRICKS_HOST}/api/2.0/accounts/servicePrincipals/${SP_ID}/credentials/secrets" \
-    -H "Authorization: Bearer $(databricks auth token --host "$DATABRICKS_HOST" | jq -r '.access_token')" \
+    -H "Authorization: Bearer $TOKEN" \
     -H "Content-Type: application/json")
 
 # Check for errors

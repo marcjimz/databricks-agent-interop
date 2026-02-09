@@ -55,16 +55,27 @@ env_vars = load_env_file()
 dbutils.widgets.text("catalog", env_vars.get("UC_CATALOG", "mcp_agents"), "Catalog")
 dbutils.widgets.text("schema", env_vars.get("UC_SCHEMA", "tools"), "Schema")
 dbutils.widgets.text("calculator_agent_url", env_vars.get("CALCULATOR_AGENT_URL", ""), "Calculator Agent URL")
+dbutils.widgets.text("foundry_endpoint", env_vars.get("FOUNDRY_ENDPOINT", ""), "Foundry Endpoint")
+dbutils.widgets.text("tenant_id", env_vars.get("TENANT_ID", ""), "Azure Tenant ID")
 
 CATALOG = dbutils.widgets.get("catalog")
 SCHEMA = dbutils.widgets.get("schema")
 CALCULATOR_AGENT_URL = dbutils.widgets.get("calculator_agent_url")
+FOUNDRY_ENDPOINT = dbutils.widgets.get("foundry_endpoint")
+TENANT_ID = dbutils.widgets.get("tenant_id")
 
+# Validate required configuration
 if not CALCULATOR_AGENT_URL:
     raise ValueError("CALCULATOR_AGENT_URL is required. Run 'make deploy-bundle' first.")
+if not FOUNDRY_ENDPOINT:
+    raise ValueError("FOUNDRY_ENDPOINT is required. Check notebooks/.env or run 'make update-agent-env'.")
+if not TENANT_ID:
+    raise ValueError("TENANT_ID is required for Azure AD OAuth. Check notebooks/.env.")
 
 print(f"Target: {CATALOG}.{SCHEMA}")
 print(f"Calculator Agent URL: {CALCULATOR_AGENT_URL}")
+print(f"Foundry Endpoint: {FOUNDRY_ENDPOINT}")
+print(f"Tenant ID: {TENANT_ID}")
 
 spark.sql(f"USE CATALOG {CATALOG}")
 try:
@@ -128,12 +139,15 @@ print(f"Connection: {CONNECTION_NAME}")
 
 # COMMAND ----------
 
-# Verify secrets exist
+# Retrieve OAuth credentials from secret scope
+# Note: secret() function only works for bearer_token, not for OAuth options.
+# We retrieve the values and pass them as literals - UC protects the connection object.
 try:
     client_id = dbutils.secrets.get(scope=SECRET_SCOPE, key="client-id")
-    print(f"Found client-id in secret scope (length: {len(client_id)})")
+    client_secret = dbutils.secrets.get(scope=SECRET_SCOPE, key="client-secret")
+    print(f"Retrieved OAuth credentials from secret scope '{SECRET_SCOPE}'")
 except Exception as e:
-    raise ValueError(f"Secret scope '{SECRET_SCOPE}' not found or missing 'client-id'. Run 'make deploy-uc' first.") from e
+    raise ValueError(f"Secret scope '{SECRET_SCOPE}' not found or missing credentials. Run 'make deploy-uc' first.") from e
 
 # COMMAND ----------
 
@@ -144,8 +158,8 @@ spark.sql(f"""
     TYPE HTTP
     OPTIONS (
         host '{AGENT_HOST}',
-        client_id secret('{SECRET_SCOPE}', 'client-id'),
-        client_secret secret('{SECRET_SCOPE}', 'client-secret'),
+        client_id '{client_id}',
+        client_secret '{client_secret}',
         oauth_scope 'all-apis',
         token_endpoint '{TOKEN_ENDPOINT}'
     )
@@ -232,6 +246,94 @@ print("Registered: epic_patient_search")
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Register Azure AI Foundry Agent
+# MAGIC
+# MAGIC This function wraps an Azure AI Foundry chat completion as a UC Function,
+# MAGIC demonstrating cross-platform agent interoperability via MCP.
+
+# COMMAND ----------
+
+# Setup Foundry HTTP Connection with OAuth M2M (Azure AD)
+# Uses Azure AD Service Principal to authenticate to Azure AI Services.
+# Same pattern as calculator agent - retrieve secrets and pass as literals.
+FOUNDRY_CONNECTION_NAME = "foundry_agent_http"
+
+# Extract host from Foundry endpoint
+match = re.match(r'(https://[^/]+)', FOUNDRY_ENDPOINT)
+if not match:
+    raise ValueError(f"Invalid FOUNDRY_ENDPOINT: {FOUNDRY_ENDPOINT}")
+
+FOUNDRY_HOST = match.group(1)
+AZURE_TOKEN_ENDPOINT = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
+
+# Retrieve Foundry SP credentials from secret scope
+foundry_client_id = dbutils.secrets.get(scope=SECRET_SCOPE, key="foundry-client-id")
+foundry_client_secret = dbutils.secrets.get(scope=SECRET_SCOPE, key="foundry-client-secret")
+print(f"Foundry Host: {FOUNDRY_HOST}")
+print(f"Azure AD Token Endpoint: {AZURE_TOKEN_ENDPOINT}")
+print(f"Retrieved Foundry OAuth credentials from secret scope")
+
+# Create HTTP connection with Azure AD OAuth M2M
+# Using Azure AI model catalog (serverless) - Llama-3.3-70B-Instruct
+spark.sql(f"DROP CONNECTION IF EXISTS {FOUNDRY_CONNECTION_NAME}")
+spark.sql(f"""
+    CREATE CONNECTION {FOUNDRY_CONNECTION_NAME}
+    TYPE HTTP
+    OPTIONS (
+        host '{FOUNDRY_HOST}',
+        base_path '/models',
+        client_id '{foundry_client_id}',
+        client_secret '{foundry_client_secret}',
+        oauth_scope 'https://cognitiveservices.azure.com/.default',
+        token_endpoint '{AZURE_TOKEN_ENDPOINT}'
+    )
+""")
+print(f"Created connection: {FOUNDRY_CONNECTION_NAME}")
+
+# COMMAND ----------
+
+# Register Foundry chat agent function (SQL with OAuth M2M)
+# Uses UC HTTP Connection with Azure AD authentication.
+# Calls Azure AI model catalog (Llama-3.3-70B-Instruct) via serverless API.
+# Configured to spell out numerical answers (e.g., "four" instead of "4").
+spark.sql(f"""
+CREATE OR REPLACE FUNCTION {CATALOG}.{SCHEMA}.foundry_chat_agent(
+    message STRING COMMENT 'Message to send to the Azure AI chat agent (Llama-3.3-70B)'
+)
+RETURNS STRING
+COMMENT 'MCP Tool: Chat with Azure AI (Llama-3.3-70B) via Entra ID OAuth. Returns answers with numbers spelled out. Demonstrates cross-platform interoperability between Databricks MCP and Azure AI.'
+RETURN (
+    SELECT
+        CASE
+            WHEN get_json_object(result.text, '$.choices[0].message.content') IS NOT NULL
+            THEN get_json_object(result.text, '$.choices[0].message.content')
+            WHEN get_json_object(result.text, '$.error.message') IS NOT NULL
+            THEN concat('Azure Error: ', get_json_object(result.text, '$.error.message'))
+            ELSE concat('Unexpected response (', result.status_code, '): ', substring(result.text, 1, 500))
+        END
+    FROM (
+        SELECT http_request(
+            conn => '{FOUNDRY_CONNECTION_NAME}',
+            method => 'POST',
+            path => '/chat/completions?api-version=2024-05-01-preview',
+            headers => map('extra-parameters', 'pass-through'),
+            json => to_json(named_struct(
+                'messages', array(
+                    named_struct('role', 'system', 'content', 'You are a helpful assistant. Always spell out all numbers in your answers. For example, use "four" instead of "4", "forty-four and two tenths" instead of "44.2", "one hundred twenty-three" instead of "123". Never use numeric digits in your responses.'),
+                    named_struct('role', 'user', 'content', message)
+                ),
+                'max_tokens', 500,
+                'model', 'Llama-3.3-70B-Instruct'
+            ))
+        ) as result
+    )
+)
+""")
+print("Registered: foundry_chat_agent")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Verify Registration
 
 # COMMAND ----------
@@ -253,24 +355,8 @@ token = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiTok
 
 # COMMAND ----------
 
-# Test 1: Direct call to calculator agent (commented out - use Test 2 or 3 instead)
-# This test uses user token which works, but the UC function uses SP OAuth token
-# print("=== Test 1: Direct call to Calculator Agent ===")
-# try:
-#     direct_response = requests.post(
-#         f"{CALCULATOR_AGENT_URL}/invocations",
-#         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-#         json={"input": [{"role": "user", "content": "add 5 and 3"}]}
-#     )
-#     print(f"Status: {direct_response.status_code}")
-#     print(f"Response: {direct_response.text[:500]}")
-# except Exception as e:
-#     print(f"Error: {e}")
-
-# COMMAND ----------
-
-# Test 2: Call UC function via SQL
-print("=== Test 2: Calculator UC Function via SQL ===")
+# Test 1: Call UC function via SQL
+print("=== Test 1: Calculator UC Function via SQL ===")
 try:
     result = spark.sql(f"SELECT {CATALOG}.{SCHEMA}.calculator_agent('add 5 and 3')").collect()[0][0]
     print(f"Result: {result}")
@@ -279,8 +365,8 @@ except Exception as e:
 
 # COMMAND ----------
 
-# Test 3: Call via MCP endpoint
-print("=== Test 3: Calculator via MCP ===")
+# Test 2: Call via MCP endpoint
+print("=== Test 2: Calculator via MCP ===")
 
 def call_mcp_function(function_name: str, arguments: dict) -> dict:
     """Call a UC function via the MCP server endpoint."""
@@ -300,10 +386,20 @@ except Exception as e:
 
 # COMMAND ----------
 
-# Test 4: Epic FHIR stub via MCP
-print("=== Test 4: Epic FHIR Stub via MCP ===")
+# Test 3: Epic FHIR stub via MCP
+print("=== Test 3: Epic FHIR Stub via MCP ===")
 try:
     result = call_mcp_function("epic_patient_search", {"family_name": "Argonaut", "given_name": "", "birthdate": ""})
+    print(json.dumps(result, indent=2))
+except Exception as e:
+    print(f"Error: {e}")
+
+# COMMAND ----------
+
+# Test 4: Azure AI Foundry chat agent via MCP
+print("=== Test 4: Foundry Chat Agent via MCP ===")
+try:
+    result = call_mcp_function("foundry_chat_agent", {"message": "What is 2 + 2? Answer briefly."})
     print(json.dumps(result, indent=2))
 except Exception as e:
     print(f"Error: {e}")
@@ -323,6 +419,9 @@ MCP Endpoints:
 
   epic_patient_search:
   https://{workspace_url}/api/2.0/mcp/functions/{CATALOG}/{SCHEMA}/epic_patient_search
+
+  foundry_chat_agent:
+  https://{workspace_url}/api/2.0/mcp/functions/{CATALOG}/{SCHEMA}/foundry_chat_agent
 
 Test with curl:
 
@@ -345,18 +444,22 @@ print(f"""
 === Required Permissions ===
 
 1. Service Principal App Access (REQUIRED - run once after deploy):
-   databricks apps set-permission calculator-agent --permission CAN_USE --service-principal-name mcp-interop-agent-caller
+   make grant-sp-permission
 
 2. UC Connection (metastore-level):
    GRANT USE CONNECTION ON CONNECTION `{CONNECTION_NAME}` TO `users`
+   GRANT USE CONNECTION ON CONNECTION `{FOUNDRY_CONNECTION_NAME}` TO `users`
 
 3. UC Function Execute:
    GRANT EXECUTE ON FUNCTION {CATALOG}.{SCHEMA}.calculator_agent TO `users`
    GRANT EXECUTE ON FUNCTION {CATALOG}.{SCHEMA}.epic_patient_search TO `users`
+   GRANT EXECUTE ON FUNCTION {CATALOG}.{SCHEMA}.foundry_chat_agent TO `users`
 
 === Architecture ===
-- Service Principal: mcp-interop-agent-caller (created by Terraform)
+- Databricks Service Principal for calculator-agent (OAuth M2M)
+- Azure AD Service Principal for Foundry (Entra ID OAuth M2M)
 - OAuth credentials stored in secret scope: {SECRET_SCOPE}
-- HTTP Connection uses OAuth M2M with automatic token refresh
-- Token endpoint: {TOKEN_ENDPOINT}
+- HTTP Connections use OAuth M2M with automatic token refresh
+- Calculator token endpoint: {TOKEN_ENDPOINT}
+- Foundry token endpoint: {AZURE_TOKEN_ENDPOINT}
 """)

@@ -7,6 +7,7 @@ This agent demonstrates:
 """
 
 import re
+import uuid
 from typing import AsyncGenerator
 
 from databricks.sdk import WorkspaceClient
@@ -81,11 +82,13 @@ async def invoke(request: ResponsesAgentRequest) -> ResponsesAgentResponse:
     # Include SP info to prove auth worked
     response_text = f"[SP: {sp_info.user_name}] {result}"
 
+    # ResponsesAgentResponse requires id and output_text content type
     return ResponsesAgentResponse(
         output=[{
             "type": "message",
+            "id": str(uuid.uuid4()),
             "role": "assistant",
-            "content": [{"type": "text", "text": response_text}]
+            "content": [{"type": "output_text", "text": response_text}]
         }]
     )
 
@@ -103,12 +106,13 @@ async def stream(request: ResponsesAgentRequest) -> AsyncGenerator[ResponsesAgen
 
     response_text = f"[SP: {sp_info.user_name}] {result}"
 
-    # Stream the response
+    # Stream the response with proper format (id and output_text content type)
     yield ResponsesAgentStreamEvent(
         type="response.output_item.done",
         item={
             "type": "message",
+            "id": str(uuid.uuid4()),
             "role": "assistant",
-            "content": [{"type": "text", "text": response_text}]
+            "content": [{"type": "output_text", "text": response_text}]
         }
     )
