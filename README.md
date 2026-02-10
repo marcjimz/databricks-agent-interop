@@ -695,7 +695,7 @@ The notebook (`register_uc_functions.py`) handles steps 4-5 automatically after 
 | Limitation | Description | Status |
 |------------|-------------|--------|
 | **OAuth token generation in notebooks** | Notebooks cannot programmatically generate OAuth secrets for Service Principals. Secrets must be created via Terraform/CLI. | Tracked internally |
-| **HTTP Connections block U2M** | UC HTTP Connections using `http_request()` in SQL do not support User-to-Machine (U2M) authentication. Use OAuth M2M (Service Principal) instead. | Platform limitation |
+| **HTTP Connections block U2M** | UC HTTP Connections using `http_request()` in SQL do not support User-to-Machine (U2M) authentication. Use OAuth M2M (Service Principal) instead, or lean on the Python WorkspaceClient() HTTP_Request equivalent. | Platform limitation |
 | **SP permission via CLI** | Granting app permissions to SPs requires using the application_id as `service_principal_name` in API calls. | Workaround documented |
 
 ---
