@@ -373,7 +373,26 @@ def call_mcp_function(function_name: str, arguments: dict) -> dict:
     url = f"https://{workspace_url}/api/2.0/mcp/functions/{CATALOG}/{SCHEMA}/{function_name}"
     qualified_name = f"{CATALOG}__{SCHEMA}__{function_name}"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    payload = {"jsonrpc": "2.0", "id": "1", "method": "tools/call", "params": {"name": qualified_name, "arguments": arguments}}
+
+    # Ensure arguments values are JSON-serializable (convert callables to their string repr)
+    clean_arguments = {}
+    for k, v in arguments.items():
+        if callable(v):
+            print(f"WARNING: argument '{k}' is a callable, converting to string")
+            clean_arguments[k] = str(v)
+        else:
+            clean_arguments[k] = v
+
+    payload = {
+        "jsonrpc": "2.0",
+        "id": "1",
+        "method": "tools/call",
+        "params": {
+            "name": str(qualified_name),
+            "arguments": clean_arguments
+        }
+    }
+
     response = requests.post(url, headers=headers, json=payload)
     response.raise_for_status()
     return response.json()
@@ -382,7 +401,9 @@ try:
     result = call_mcp_function("calculator_agent", {"expression": "multiply 7 by 6"})
     print(json.dumps(result, indent=2))
 except Exception as e:
+    import traceback
     print(f"Error: {e}")
+    traceback.print_exc()
 
 # COMMAND ----------
 
@@ -390,9 +411,15 @@ except Exception as e:
 print("=== Test 3: Epic FHIR Stub via MCP ===")
 try:
     result = call_mcp_function("epic_patient_search", {"family_name": "Argonaut", "given_name": "", "birthdate": ""})
-    print(json.dumps(result, indent=2))
+    # Handle case where result might contain non-serializable objects
+    if callable(result):
+        print(f"Error: result is a callable: {result}")
+    else:
+        print(json.dumps(result, indent=2))
 except Exception as e:
+    import traceback
     print(f"Error: {e}")
+    traceback.print_exc()
 
 # COMMAND ----------
 
@@ -402,7 +429,9 @@ try:
     result = call_mcp_function("foundry_chat_agent", {"message": "What is 2 + 2? Answer briefly."})
     print(json.dumps(result, indent=2))
 except Exception as e:
+    import traceback
     print(f"Error: {e}")
+    traceback.print_exc()
 
 # COMMAND ----------
 

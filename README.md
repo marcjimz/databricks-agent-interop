@@ -257,6 +257,8 @@ curl -X POST "${DATABRICKS_HOST}/api/2.0/mcp/functions/mcp_agents/tools/epic_pat
 
 ## Step 4: Test from Azure AI Foundry
 
+For detailed setup instructions with OAuth authentication, see **[foundry/README.md](foundry/README.md)**.
+
 ### 4a. Python MCP Client
 
 ```python

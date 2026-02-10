@@ -37,6 +37,10 @@ terraform {
       source  = "hashicorp/azuread"
       version = "~> 2.0"
     }
+    azapi = {
+      source  = "Azure/azapi"
+      version = "~> 2.0"
+    }
   }
 }
 
@@ -68,7 +72,12 @@ variable "location" {
 
 variable "prefix" {
   description = "Prefix for resource names"
-  default     = "mcp-agent-interop"
+  default     = "mcpagent01"
+}
+
+variable "resource_group_name" {
+  description = "Name of the Azure resource group"
+  default     = ""
 }
 
 variable "tenant_id" {
@@ -85,6 +94,14 @@ variable "deploy_uc" {
 }
 
 # =============================================================================
+# Locals
+# =============================================================================
+
+locals {
+  resource_group_name = var.resource_group_name != "" ? var.resource_group_name : "rg-${var.prefix}"
+}
+
+# =============================================================================
 # Data Sources
 # =============================================================================
 
@@ -95,7 +112,7 @@ data "azurerm_client_config" "current" {}
 # =============================================================================
 
 resource "azurerm_resource_group" "main" {
-  name     = "rg-${var.prefix}"
+  name     = local.resource_group_name
   location = var.location
 
   tags = {
@@ -310,6 +327,10 @@ resource "databricks_storage_credential" "unity" {
   azure_managed_identity {
     access_connector_id = azurerm_databricks_access_connector.unity.id
   }
+
+  lifecycle {
+    replace_triggered_by = [azurerm_databricks_workspace.main.id]
+  }
 }
 
 # External Location
@@ -321,6 +342,10 @@ resource "databricks_external_location" "catalog" {
   credential_name = databricks_storage_credential.unity[0].name
 
   depends_on = [databricks_storage_credential.unity]
+
+  lifecycle {
+    replace_triggered_by = [azurerm_databricks_workspace.main.id]
+  }
 }
 
 # =============================================================================
@@ -335,6 +360,10 @@ resource "databricks_service_principal" "agent_caller" {
   provider             = databricks.workspace
   display_name         = "${var.prefix}-agent-caller"
   allow_cluster_create = false
+
+  lifecycle {
+    replace_triggered_by = [azurerm_databricks_workspace.main.id]
+  }
 }
 
 # =============================================================================
@@ -350,6 +379,10 @@ resource "databricks_secret_scope" "oauth" {
   name     = "mcp-agent-oauth"
 
   depends_on = [databricks_service_principal.agent_caller]
+
+  lifecycle {
+    replace_triggered_by = [azurerm_databricks_workspace.main.id]
+  }
 }
 
 resource "databricks_secret" "client_id" {
@@ -358,6 +391,10 @@ resource "databricks_secret" "client_id" {
   scope        = databricks_secret_scope.oauth[0].name
   key          = "client-id"
   string_value = databricks_service_principal.agent_caller[0].application_id
+
+  lifecycle {
+    replace_triggered_by = [azurerm_databricks_workspace.main.id]
+  }
 }
 
 # Placeholder for client_secret - will be populated by create-sp-secret script
@@ -403,6 +440,10 @@ resource "databricks_secret" "foundry_client_id" {
   scope        = databricks_secret_scope.oauth[0].name
   key          = "foundry-client-id"
   string_value = azuread_application.foundry_caller[0].client_id
+
+  lifecycle {
+    replace_triggered_by = [azurerm_databricks_workspace.main.id]
+  }
 }
 
 resource "databricks_secret" "foundry_client_secret" {
@@ -411,6 +452,10 @@ resource "databricks_secret" "foundry_client_secret" {
   scope        = databricks_secret_scope.oauth[0].name
   key          = "foundry-client-secret"
   string_value = azuread_service_principal_password.foundry_caller[0].value
+
+  lifecycle {
+    replace_triggered_by = [azurerm_databricks_workspace.main.id]
+  }
 }
 
 # =============================================================================
@@ -426,6 +471,10 @@ resource "databricks_catalog" "mcp_agents" {
   force_destroy = true
 
   depends_on = [databricks_external_location.catalog]
+
+  lifecycle {
+    replace_triggered_by = [azurerm_databricks_workspace.main.id]
+  }
 }
 
 resource "databricks_schema" "tools" {
@@ -486,6 +535,11 @@ output "foundry_hub_id" {
 output "foundry_project_id" {
   description = "AI Foundry Project resource ID"
   value       = azurerm_ai_foundry_project.main.id
+}
+
+output "project_endpoint" {
+  description = "Azure AI Foundry project endpoint for Agent Service SDK"
+  value       = "https://${var.location}.api.azureml.ms/"
 }
 
 output "resource_group" {

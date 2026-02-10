@@ -28,3 +28,4 @@
 examples/*
 INSTRUCTIONS.md
 notebooks/settings.yaml
+foundry/.agent_id
