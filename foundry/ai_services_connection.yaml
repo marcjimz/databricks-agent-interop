@@ -1,0 +1,6 @@
+# Azure AI Services connection for Agent Service
+$schema: https://azuremlschemas.azureedge.net/latest/connection.schema.json
+name: ai-services-connection
+type: azure_ai_services
+endpoint: https://aismcpagent01.cognitiveservices.azure.com/
+ai_services_resource_id: /subscriptions/edd4cc45-85c7-4aec-8bf5-648062d519bf/resourceGroups/rg-mcpagent01/providers/Microsoft.CognitiveServices/accounts/ais-mcpagent01

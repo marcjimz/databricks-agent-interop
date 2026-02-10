@@ -1,0 +1,7 @@
+command: ["bash", "-c", "pip install -e . && start-server"]
+
+env:
+  - name: MLFLOW_TRACKING_URI
+    value: "databricks"
+  - name: PYTHONUNBUFFERED
+    value: "1"

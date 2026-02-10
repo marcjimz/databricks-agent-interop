@@ -1,1 +1,1 @@
-"""A2A Gateway Test Suite."""
+"""Tests for Databricks Agent Interoperability Framework."""

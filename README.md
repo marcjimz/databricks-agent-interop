@@ -1,508 +1,710 @@
-# Databricks A2A Gateway Framework
+# Databricks Agent Interoperability Framework
 
 ![./static/img/dbx-banner.jpeg](./static/img/dbx-banner.jpeg)
 
-A framework for [A2A protocol](https://google.github.io/A2A/) interoperability on Databricks, powered by Unity Catalog for agent discovery and access control. Deploy an A2A gateway and let Unity Catalog handle agentic discovery, authorization, and interoperability.
+A framework for **agent interoperability** on Databricks, where **Unity Catalog** is the heart for discovery, governance, and traceability. Wrap any agent—internal or external—as a UC Function and expose it via **MCP (Model Context Protocol)** for seamless access across platforms.
 
-For more on AI Agent Protocols, see: [A Survey of AI Agent Protocols](https://arxiv.org/pdf/2504.16736)
+## Prerequisites
 
-![AgentProtocols](./static/img/agent_protocols.png)
+| Tool | Installation |
+|------|--------------|
+| Terraform | https://terraform.io/downloads |
+| Azure CLI | https://aka.ms/installazurecli |
+| Databricks CLI | `pip install databricks-cli` |
+| Python 3.10+ | https://python.org |
 
-## What's Included
+```bash
+# Verify installations
+terraform --version
+az --version
+databricks --version
+```
 
-| Component | Description |
-|-----------|-------------|
-| **Gateway** | FastAPI app for agent discovery, authorization, and proxying |
-| **Demo Agents** | Echo and Calculator agents for testing |
-| **Orchestrator** | Deployable agent that discovers and calls other A2A agents |
-| **Notebooks** | Interactive demos and deployment scripts |
+---
+
+## Three Pillars
+
+| Pillar | What It Means |
+|--------|---------------|
+| **Interoperability** | External agents wrapped as UC Functions, exposed via MCP |
+| **Governance** | Unity Catalog provides discovery, access control, and audit trails |
+| **Performance** | Multi-agent orchestration via [Agent Bricks](https://docs.databricks.com/aws/en/generative-ai/agent-bricks/) |
 
 ## Architecture
 
 ```
-┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│   User/Agent    │────▶│   A2A Gateway   │────▶│  A2A Agents     │
-│                 │     │  (Databricks    │     │  (Echo, Calc,   │
-│                 │     │   App)          │     │   External)     │
-└─────────────────┘     └────────┬────────┘     └─────────────────┘
-                                 │
-                        ┌────────▼────────┐
-                        │  Unity Catalog  │
-                        │  (Connections)  │
-                        └─────────────────┘
+┌───────────────────────────────────────────────────────────────────┐
+│                        Unity Catalog                              │
+│                  (Discovery + Governance + Audit)                 │
+│                                                                   │
+│   UC Functions          UC Connections          UC Permissions    │
+│   (MCP Tools)           (Credentials)           (EXECUTE grants)  │
+└───────────────────────────────┬───────────────────────────────────┘
+                                │
+                                ▼
+┌───────────────────────────────────────────────────────────────────┐
+│                    Databricks Managed MCP                         │
+│            /api/2.0/mcp/functions/{catalog}/{schema}              │
+└───────────────────────────────┬───────────────────────────────────┘
+                                │
+        ┌───────────────────────┼───────────────────────┐
+        ▼                       ▼                       ▼
+   Databricks              Azure AI                 Any MCP
+    Agents                 Foundry                  Client
+
+
+┌─────────────────── UC Functions as Wrappers ───────────────────────┐
+│                                                                     │
+│   ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐│
+│   │   echo_agent    │    │calculator_agent │    │epic_patient_    ││
+│   │   (UC Func)     │    │   (UC Func)     │    │search (UC Func) ││
+│   └────────┬────────┘    └────────┬────────┘    └────────┬────────┘│
+│            │                      │                      │          │
+│            ▼                      ▼                      ▼          │
+│   ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐│
+│   │  Echo Agent     │    │Calculator Agent │    │  Epic FHIR      ││
+│   │ (Databricks App)│    │(Databricks App) │    │  (Stub API)     ││
+│   │ ResponsesAgent  │    │ ResponsesAgent  │    │                 ││
+│   └─────────────────┘    └─────────────────┘    └─────────────────┘│
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-**Gateway Endpoints:**
-| Endpoint | Purpose |
+---
+
+## Step 0: Configure Environment
+
+Create your configuration file before deploying infrastructure.
+
+```bash
+# Create .env from template
+make setup
+
+# Edit .env with your Azure values
+```
+
+### .env Configuration
+
+```bash
+# Required for infrastructure deployment
+TENANT_ID=your-azure-tenant-id
+SUBSCRIPTION_ID=your-azure-subscription-id
+LOCATION=eastus2
+PREFIX=mcp-interop
+
+# Unity Catalog
+UC_CATALOG=mcp_agents
+UC_SCHEMA=tools
+
+# Set automatically after deployment (Step 1)
+# DATABRICKS_HOST=https://adb-xxxx.azuredatabricks.net
+# FOUNDRY_ENDPOINT=https://your-foundry.azure.com
+```
+
+After infrastructure deployment, `DATABRICKS_HOST` and `FOUNDRY_ENDPOINT` are automatically added to your `.env` file.
+
+---
+
+## Step 1: Deploy Infrastructure
+
+Infrastructure deployment is split into two phases to handle cross-tenant metastore scenarios.
+
+### Phase 1: Deploy Azure Resources
+
+```bash
+make deploy-infra
+```
+
+This deploys:
+
+| Resource | Purpose |
 |----------|---------|
-| `GET /api/agents` | List accessible agents |
-| `GET /api/agents/{name}` | Get agent info |
-| `GET /api/agents/{name}/.well-known/agent.json` | Get agent card |
-| `POST /api/agents/{name}` | A2A JSON-RPC proxy (see below) |
-| `POST /api/agents/{name}/stream` | A2A streaming via SSE |
-| `GET /docs` | Swagger UI |
+| Azure Databricks Workspace | Premium SKU for Unity Catalog |
+| Azure AI Foundry | AI Hub + AI Services + Project |
+| Storage Accounts | For Unity Catalog and AI Foundry |
+| Access Connector | Managed identity for UC storage access |
 
-### A2A JSON-RPC Proxy
+After deployment, your `.env` is updated with:
+- `DATABRICKS_HOST` — Your workspace URL
+- `FOUNDRY_ENDPOINT` — Your AI Foundry endpoint
 
-The `POST /api/agents/{name}` endpoint is a fully **A2A-compliant JSON-RPC proxy** that supports all standard A2A methods:
+### Phase 2: Assign Metastore (Manual)
 
-| Method | Description | Example |
-|--------|-------------|---------|
-| `message/send` | Send a message to an agent | Start a new task |
-| `tasks/get` | Get task status by ID | Poll for completion |
-| `tasks/cancel` | Cancel a running task | Abort long-running work |
-| `tasks/resubscribe` | Resubscribe to task updates | Resume after disconnect |
+1. Go to [Databricks Account Console](https://accounts.azuredatabricks.net)
+2. Navigate to **Data** → **Metastores**
+3. Select your metastore and click **Assign to workspace**
+4. Choose the newly created workspace (`dbx-mcp-interop`)
 
-**Example: Send a message**
-```bash
-curl -X POST "${GATEWAY_URL}/api/agents/marcin-echo" \
-  -H "Authorization: Bearer ${TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": "1",
-    "method": "message/send",
-    "params": {
-      "message": {
-        "messageId": "msg-1",
-        "role": "user",
-        "parts": [{"kind": "text", "text": "Hello!"}]
-      }
-    }
-  }'
-```
+### Phase 3: Deploy Unity Catalog Resources
 
-**Example: Get task status**
-```bash
-curl -X POST "${GATEWAY_URL}/api/agents/marcin-calculator" \
-  -H "Authorization: Bearer ${TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": "2",
-    "method": "tasks/get",
-    "params": {"id": "task-uuid-here"}
-  }'
-```
-
-The gateway proxies all JSON-RPC requests to the downstream agent while enforcing Unity Catalog access control.
-
-## Key Concepts
-
-**Discovery Standard**:
-- UC HTTP connection name ends with `-a2a` → agent is discoverable
-- Connection options:
-  - `host` = agent base URL (e.g., `https://agent.com`)
-  - `base_path` = agent card path (e.g., `/.well-known/agent.json`)
-- Gateway fetches the agent card from `host` + `base_path` and uses the `url` field for messaging
-
-**Authorization**: Uses Databricks OBO (On-Behalf-Of) to check if the calling user/principal can access the UC connection.
-
-**Authentication to Downstream Agents** (aligned with [A2A OAuth support](https://google.github.io/A2A/)):
-| Scenario | Connection Options | Auth Method |
-|----------|-------------------|-------------|
-| Same Azure tenant | `bearer_token: "databricks"` | Gateway passes caller's Entra ID token |
-| External (static token) | `bearer_token: "<token>"` | Gateway uses stored token |
-| External (OAuth M2M) | `client_id`, `client_secret`, `token_endpoint` | Gateway acquires token via client credentials flow |
-
-**Interoperability**: Any A2A-compliant agent can be registered (ServiceNow, Workday, custom). The gateway fetches the agent card and proxies to the endpoint URL specified in the card.
-
-## Quick Start
-
-**Prerequisites:** Databricks CLI configured, `make`
+After metastore assignment:
 
 ```bash
-PREFIX=yourname
-make deploy PREFIX=$PREFIX
-make status
+make deploy-uc
 ```
 
-**Run the Demo Notebook:**
+This creates:
 
-After deployment, open your Databricks workspace and navigate to:
-```
-/Workspace/Users/<your-email>/.bundle/a2a-gateway/dev/files/notebooks/a2a_demo.py
-```
+| Resource | Purpose |
+|----------|---------|
+| Storage Credential | Links Access Connector to UC |
+| External Location | Points to ADLS storage |
+| Catalog `mcp_agents` | Container for MCP tools |
+| Schema `mcp_agents.tools` | Where UC Functions live |
 
-This notebook demonstrates agent discovery, messaging, and streaming using the A2A SDK.
+The `make deploy-uc` command also deploys a notebook to your workspace via Databricks Asset Bundles. After running it, you'll see a URL to open the notebook.
 
-## Register Agents
+---
 
-We deployed two example agents as part of this orchestration, governance setup is as follows:
+## Step 2: Register UC Functions as MCP Tools
 
-**Convention**:
-- Connection name ends with `-a2a` → agent is discoverable by the gateway
-- `host` = agent base URL (no path)
-- `base_path` = agent card path (e.g., `/.well-known/agent.json`)
+Open the notebook URL provided by `make deploy-uc` and run all cells. This registers the UC Functions which automatically become MCP tools.
 
-```bash
-# Set your prefix (same as used in make deploy); this is not required for anything other than to avoid duplicates in a workspace. Repeated for consistency.
-# PREFIX=<your-prefix>
+The notebook registers:
 
-# Get agent base URLs
-ECHO_URL=$(databricks apps get "${PREFIX}-echo-agent" --output json | jq -r '.url')
-CALC_URL=$(databricks apps get "${PREFIX}-calculator-agent" --output json | jq -r '.url')
+| Function | Description |
+|----------|-------------|
+| `echo_agent` | Calls the Echo Agent (Databricks App) via MLflow `/invocations` endpoint |
+| `calculator_agent` | Calls the Calculator Agent (Databricks App) via MLflow `/invocations` endpoint |
+| `epic_patient_search` | FHIR Patient search stub (simulates Epic Sandbox API) |
 
-# Create UC connections - "databricks" indicates same-tenant Entra ID pass-through
-databricks connections create --json "{
-  \"name\": \"${PREFIX}-echo-a2a\",
-  \"connection_type\": \"HTTP\",
-  \"options\": {\"host\": \"${ECHO_URL}\", \"base_path\": \"/.well-known/agent.json\", \"bearer_token\": \"databricks\"},
-  \"comment\": \"Echo Agent\"
-}"
+### Verify Registration
 
-databricks connections create --json "{
-  \"name\": \"${PREFIX}-calculator-a2a\",
-  \"connection_type\": \"HTTP\",
-  \"options\": {\"host\": \"${CALC_URL}\", \"base_path\": \"/.well-known/agent.json\", \"bearer_token\": \"databricks\"},
-  \"comment\": \"Calculator Agent\"
-}"
-
-# Grant access
-databricks grants update connection "${PREFIX}-echo-a2a" \
-  --json '{"changes": [{"add": ["USE_CONNECTION"], "principal": "marcin.jimenez@databricks.com"}]}'
+```sql
+SHOW FUNCTIONS IN mcp_agents.tools;
 ```
 
-### External Agents (Different Tenant / No Entra ID)
+---
 
-For agents outside your Azure tenant, UC HTTP connections support multiple auth methods:
+## Step 3: Test from Databricks
 
-**Option 1: Static Bearer Token**
-```bash
-databricks connections create --json '{
-  "name": "servicenow-a2a",
-  "connection_type": "HTTP",
-  "options": {
-    "host": "https://myinstance.service-now.com",
-    "base_path": "/api/sn_aia/a2a/id/ABC123/well_known/agent_json",
-    "bearer_token": "your-static-token"
-  }
-}'
+### 3a. SQL
+
+```sql
+-- Test echo agent (requires agent to be running)
+SELECT mcp_agents.tools.echo_agent('Hello from Databricks!');
+
+-- Test calculator agent (requires agent to be running)
+SELECT mcp_agents.tools.calculator_agent('add 5 and 3');
+SELECT mcp_agents.tools.calculator_agent('multiply 10 by 4');
+
+-- Test Epic FHIR stub (always works - local stub data)
+SELECT mcp_agents.tools.epic_patient_search('Argonaut', 'Jason', NULL);
+SELECT mcp_agents.tools.epic_patient_search('Smith', NULL, NULL);
 ```
 
-**Option 2: OAuth M2M (Client Credentials Flow)** - Recommended for A2A
-```bash
-databricks connections create --json '{
-  "name": "workday-a2a",
-  "connection_type": "HTTP",
-  "options": {
-    "host": "https://mycompany.workday.com",
-    "base_path": "/.well-known/agent.json",
-    "client_id": "your-client-id",
-    "client_secret": "your-client-secret",
-    "token_endpoint": "https://auth.workday.com/oauth2/token",
-    "oauth_scope": "a2a.agents"
-  }
-}'
-```
-
-The gateway automatically acquires and caches OAuth tokens when using M2M credentials.
-
-## Usage
-
-First, capture the gateway URL and auth token:
-
-```bash
-# Set your prefix and Databricks host
-PREFIX=marcin
-DATABRICKS_HOST=https://e2-demo-field-eng.cloud.databricks.com/
-
-# Get gateway URL and auth token
-GATEWAY_URL=$(databricks apps get "${PREFIX}-a2a-gateway" --output json | jq -r '.url')
-TOKEN=$(databricks auth token --host "${DATABRICKS_HOST}" | jq -r '.access_token')
-```
-
-> **Note**: If `databricks auth token` prompts for host, ensure you've logged in first:
-> ```bash
-> databricks auth login --host "${DATABRICKS_HOST}"
-> ```
-
-### 1. Explore the API
-
-Open Swagger UI at `${GATEWAY_URL}/docs` to interactively test all endpoints.
-
-### 2. Discover Accessible Agents
-
-```bash
-curl -s "${GATEWAY_URL}/api/agents" \
-  -H "Authorization: Bearer ${TOKEN}" | jq
-```
-
-Response (only agents you have UC connection access to):
-```json
-{
-  "agents": [
-    {
-      "name": "marcin-calculator",
-      "description": "Calculator Agent",
-      "agent_card_url": "https://marcin-calculator-agent-1444828305810485.aws.databricksapps.com/.well-known/agent.json",
-      "url": null,
-      "bearer_token": null,
-      "oauth_m2m": null,
-      "connection_name": "marcin-calculator-a2a",
-      "catalog": "main",
-      "schema_name": "default"
-    },
-    {
-      "name": "marcin-echo",
-      "description": "Echo Agent",
-      "agent_card_url": "https://marcin-echo-agent-1444828305810485.aws.databricksapps.com/.well-known/agent.json",
-      "url": null,
-      "bearer_token": null,
-      "oauth_m2m": null,
-      "connection_name": "marcin-echo-a2a",
-      "catalog": "main",
-      "schema_name": "default"
-    }
-  ],
-  "total": 2
-}
-```
-
-### 3. Call an Agent
-
-```bash
-curl -X POST "${GATEWAY_URL}/api/agents/marcin-echo/message" \
-  -H "Authorization: Bearer ${TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": "1",
-    "method": "message/send",
-    "params": {
-      "message": {
-        "messageId": "msg-1",
-        "role": "user",
-        "parts": [{"kind": "text", "text": "Hello from A2A!"}]
-      }
-    }
-  }' | jq
-```
-
-Response:
-```json
-{
-  "jsonrpc": "2.0",
-  "id": "1",
-  "result": {
-    "artifacts": [{"parts": [{"kind": "text", "text": "Echo: Hello from A2A!"}]}],
-    "status": "completed"
-  }
-}
-```
-
-### 4. Access Denied (No UC Connection Access)
-
-If you don't have `USE_CONNECTION` privilege, you get a **403 Forbidden**:
-
-```bash
-curl -s "${GATEWAY_URL}/api/agents/${PREFIX}-calculator/message" \
-  -X POST \
-  -H "Authorization: Bearer ${TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":"1","method":"message/send","params":{"message":{"messageId":"msg-1","role":"user","parts":[{"kind":"text","text":"Hello"}]}}}' | jq
-```
-
-Response (HTTP 403):
-```json
-{
-  "detail": "Access denied to agent 'marcin-calculator'. Ensure you have USE_CONNECTION privilege on connection 'marcin-calculator-a2a'."
-}
-```
-
-### 5. Grant/Revoke Access
-
-Grant access:
-```bash
-databricks grants update connection "${PREFIX}-calculator-a2a" \
-    --json '{"changes": [{"add": ["USE_CONNECTION"], "principal": "marcin.jimenez@databricks.com"}]}'
-```
-
-Now the same request succeeds. Revoke to deny:
-```bash
-databricks grants update connection "${PREFIX}-calculator-a2a" \
-    --json '{"changes": [{"remove": ["USE_CONNECTION"], "principal": "marcin.jimenez@databricks.com"}]}'
-```
-
-### 6. Agent-to-Agent via Gateway
-
-An agent can call other agents through the gateway. Configure your agent to use the gateway URL:
+### 3b. Python
 
 ```python
-# In your agent code
-import os
-import httpx
+from src.agents.databricks import DatabricksMCPAgent
 
-GATEWAY_URL = os.environ.get("GATEWAY_URL", "https://your-gateway.databricksapps.com")
+agent = DatabricksMCPAgent(catalog="mcp_agents", schema="tools")
 
-async def call_calculator(expression: str):
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            f"{GATEWAY_URL}/api/agents/calculator/message",
-            json={
-                "jsonrpc": "2.0",
-                "id": "1",
-                "method": "message/send",
-                "params": {
-                    "message": {
-                        "messageId": "agent-call-1",
-                        "role": "user",
-                        "parts": [{"kind": "text", "text": expression}]
-                    }
-                }
-            }
-        )
-        return response.json()
+# Call echo agent
+result = agent.call_function("echo_agent", message="Hello from Python!")
+print(result)
 
-# Agent can now use calculator if it has UC connection access
-result = await call_calculator("Add 42 and 17")
+# Call calculator agent
+result = agent.call_function("calculator_agent", expression="add 10 and 5")
+print(result)
+
+# Search Epic FHIR (stub)
+result = agent.call_function("epic_patient_search", family_name="Argonaut")
+print(result)
 ```
 
-The gateway enforces the same UC connection access for agent-to-agent calls - the calling agent's service principal must have `USE CONNECTION` privilege.
+### 3c. curl
 
-## Commands
+```bash
+# Get token
+TOKEN=$(databricks auth token | jq -r '.access_token')
+
+# Call echo agent
+curl -X POST "${DATABRICKS_HOST}/api/2.0/mcp/functions/mcp_agents/tools/echo_agent" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": "1",
+    "method": "tools/call",
+    "params": {"name": "echo_agent", "arguments": {"message": "Hello via MCP!"}}
+  }'
+
+# Call calculator agent
+curl -X POST "${DATABRICKS_HOST}/api/2.0/mcp/functions/mcp_agents/tools/calculator_agent" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": "1",
+    "method": "tools/call",
+    "params": {"name": "calculator_agent", "arguments": {"expression": "multiply 25 by 4"}}
+  }'
+
+# Search Epic FHIR (stub)
+curl -X POST "${DATABRICKS_HOST}/api/2.0/mcp/functions/mcp_agents/tools/epic_patient_search" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": "1",
+    "method": "tools/call",
+    "params": {"name": "epic_patient_search", "arguments": {"family_name": "Argonaut"}}
+  }'
+```
+
+---
+
+## Step 4: Test from Azure AI Foundry
+
+For detailed setup instructions with OAuth authentication, see **[foundry/README.md](foundry/README.md)**.
+
+### 4a. Python MCP Client
+
+```python
+from src.agents.foundry import FoundryMCPClient
+
+client = FoundryMCPClient(
+    workspace_url="https://<workspace>.azuredatabricks.net",
+    catalog="mcp_agents",
+    schema="tools"
+)
+
+# List available tools
+tools = client.list_tools()
+for t in tools:
+    print(f"  {t['name']}: {t.get('description', '')}")
+
+# Call echo agent
+result = client.call_tool("echo_agent", {"message": "Hello from Foundry!"})
+print(result.content)
+
+# Call calculator agent
+result = client.call_tool("calculator_agent", {"expression": "add 15 and 27"})
+print(result.content)
+
+# Search patients
+result = client.call_tool("epic_patient_search", {"family_name": "Argonaut"})
+print(result.content)
+```
+
+### 4b. Azure CLI
+
+```bash
+# Get token for Databricks (Azure)
+TOKEN=$(az account get-access-token \
+  --resource 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d \
+  -o tsv --query accessToken)
+
+# Call echo agent
+curl -X POST "https://<workspace>.azuredatabricks.net/api/2.0/mcp/functions/mcp_agents/tools/echo_agent" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"echo_agent","arguments":{"message":"Hello from Foundry!"}}}'
+
+# Search Epic FHIR (stub)
+curl -X POST "https://<workspace>.azuredatabricks.net/api/2.0/mcp/functions/mcp_agents/tools/epic_patient_search" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"epic_patient_search","arguments":{"family_name":"Smith"}}}'
+```
+
+---
+
+## Step 5: Test Access Control
+
+Unity Catalog enforces who can execute MCP tools.
+
+### Grant Access
+
+```sql
+-- Grant to a user
+GRANT EXECUTE ON FUNCTION mcp_agents.tools.echo_agent TO `alice@company.com`;
+GRANT EXECUTE ON FUNCTION mcp_agents.tools.calculator_agent TO `alice@company.com`;
+GRANT EXECUTE ON FUNCTION mcp_agents.tools.epic_patient_search TO `alice@company.com`;
+
+-- Grant to a group
+GRANT EXECUTE ON FUNCTION mcp_agents.tools.echo_agent TO `data-science-team`;
+
+-- Grant to a service principal
+GRANT EXECUTE ON FUNCTION mcp_agents.tools.epic_patient_search TO `my-app-sp`;
+```
+
+### Revoke Access
+
+```sql
+REVOKE EXECUTE ON FUNCTION mcp_agents.tools.calculator_agent FROM `intern-group`;
+```
+
+### View Permissions
+
+```sql
+SELECT grantee, privilege
+FROM system.information_schema.function_privileges
+WHERE function_catalog = 'mcp_agents'
+  AND function_schema = 'tools';
+```
+
+### Test Denied Access
+
+A user without EXECUTE permission receives `403 Forbidden`.
+
+---
+
+## Step 6: Wrap Agents as UC Functions
+
+The core pattern: **Any agent → UC Function → MCP Tool**
+
+### Example: Wrap a Custom Agent
+
+```sql
+CREATE OR REPLACE FUNCTION mcp_agents.tools.my_agent(
+    message STRING COMMENT 'Message to send to the agent'
+)
+RETURNS STRING
+LANGUAGE PYTHON
+COMMENT 'MCP Tool: My custom agent'
+AS $$
+import json
+import requests
+
+def my_agent(message: str) -> str:
+    # Your agent logic here
+    # - Call an LLM
+    # - Query a database
+    # - Call an external API
+
+    response = f"Processed: {message}"
+
+    return json.dumps({
+        "response": response,
+        "status": "success"
+    })
+
+return my_agent(message)
+$$;
+```
+
+### Example: Wrap an Azure AI Foundry Agent
+
+```sql
+CREATE OR REPLACE FUNCTION mcp_agents.tools.call_foundry_agent(
+    agent_name STRING COMMENT 'Name of the Foundry agent',
+    message STRING COMMENT 'Message to send'
+)
+RETURNS STRING
+LANGUAGE PYTHON
+COMMENT 'MCP Tool: Call an Azure AI Foundry agent'
+AS $$
+import json
+import os
+import requests
+
+foundry_endpoint = os.environ.get("FOUNDRY_ENDPOINT")
+token = os.environ.get("AZURE_TOKEN")
+
+response = requests.post(
+    f"{foundry_endpoint}/agents/{agent_name}/invoke",
+    headers={"Authorization": f"Bearer {token}"},
+    json={"messages": [{"role": "user", "content": message}]}
+)
+
+return json.dumps(response.json())
+$$;
+```
+
+---
+
+## Step 7: Use UC Functions as MCP Tools
+
+Once registered, UC Functions are automatically available as MCP tools.
+
+### MCP Endpoints
+
+| Tool | Endpoint |
+|------|----------|
+| `echo_agent` | `/api/2.0/mcp/functions/mcp_agents/tools/echo_agent` |
+| `calculator_agent` | `/api/2.0/mcp/functions/mcp_agents/tools/calculator_agent` |
+| `epic_patient_search` | `/api/2.0/mcp/functions/mcp_agents/tools/epic_patient_search` |
+
+### From a Databricks Agent
+
+```python
+from src.agents.databricks import DatabricksMCPAgent
+
+agent = DatabricksMCPAgent(catalog="mcp_agents", schema="tools")
+
+# Use echo agent
+response = agent.call_function("echo_agent", message="Hello!")
+
+# Use calculator agent
+result = agent.call_function("calculator_agent", expression="add 42 and 2")
+
+# Search patients
+result = agent.call_function("epic_patient_search", family_name="Smith")
+```
+
+### From a Foundry Agent
+
+```python
+from src.agents.foundry import FoundryMCPClient
+
+client = FoundryMCPClient(
+    workspace_url="https://<workspace>.azuredatabricks.net",
+    catalog="mcp_agents",
+    schema="tools"
+)
+
+result = client.call_tool("calculator_agent", {"expression": "add 100 and 200"})
+result = client.call_tool("epic_patient_search", {"family_name": "Argonaut"})
+```
+
+---
+
+## Step 8: Audit & Governance
+
+Unity Catalog automatically logs all function executions.
+
+### View Function Executions
+
+```sql
+SELECT
+    event_time,
+    user_identity.email as user,
+    request_params.full_name_arg as function_name,
+    response.status_code,
+    source_ip_address
+FROM system.access.audit
+WHERE action_name = 'executeFunction'
+  AND request_params.full_name_arg LIKE 'mcp_agents.tools.%'
+ORDER BY event_time DESC
+LIMIT 100;
+```
+
+### View Permission Grants
+
+```sql
+SELECT grantee, privilege, inherited_from
+FROM system.information_schema.function_privileges
+WHERE function_catalog = 'mcp_agents'
+  AND function_schema = 'tools';
+```
+
+### Audit Log Example
+
+```
+┌───────────┬────────────────┬────────────────┬────────────────┐
+│ Time      │ User           │ Function       │ Source IP      │
+├───────────┼────────────────┼────────────────┼────────────────┤
+│ 10:30:00  │ alice@corp.com │ echo           │ 10.0.0.5       │
+│ 10:30:01  │ alice@corp.com │ calculator     │ 10.0.0.5       │
+│ 10:30:05  │ bob@corp.com   │ echo           │ 10.0.0.8       │
+│ 10:31:00  │ sp-foundry-app │ calculator     │ 52.168.1.100   │
+└───────────┴────────────────┴────────────────┴────────────────┘
+```
+
+---
+
+## Step 9: Test from Microsoft Teams
+
+Use Microsoft Copilot Studio to connect Databricks MCP tools to Teams.
+
+### 9a. Create Copilot Studio Agent
+
+1. Go to [Copilot Studio](https://copilotstudio.microsoft.com)
+2. Create a new **Custom Copilot**
+3. Name it (e.g., "MCP Tools Agent")
+
+### 9b. Add MCP Connection
+
+1. Go to **Settings** → **Generative AI** → **Dynamic**
+2. Click **Add knowledge** → **Model Context Protocol**
+3. Configure:
+
+| Setting | Value |
+|---------|-------|
+| Name | `Databricks MCP Tools` |
+| Endpoint URL | `https://<workspace>.azuredatabricks.net/api/2.0/mcp/functions/mcp_agents/tools` |
+| Authentication | `OAuth 2.0` |
+| Client ID | Your Entra app registration client ID |
+| Client Secret | Your app registration secret |
+| Token URL | `https://login.microsoftonline.com/<tenant-id>/oauth2/v2.0/token` |
+| Scope | `2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default` |
+
+4. Click **Test Connection**
+
+### 9c. Publish to Teams
+
+1. Go to **Channels** → **Microsoft Teams**
+2. Click **Turn on Teams**
+3. Click **Open in Teams** to test
+
+### 9d. Test in Teams
+
+```
+You: Echo "Hello from Teams!"
+
+Copilot: [Calling MCP tool: echo]
+         {"echo": "Hello from Teams!", "timestamp": "2025-02-07T10:30:00", ...}
+
+You: What is 25 times 4?
+
+Copilot: [Calling MCP tool: calculator]
+         {"expression": "25 * 4", "result": 100, ...}
+
+You: Calculate (100 + 50) divided by 3
+
+Copilot: [Calling MCP tool: calculator]
+         {"expression": "(100 + 50) / 3", "result": 50.0, ...}
+```
+
+---
+
+## Agent Bricks: Multi-Agent Orchestration
+
+[Agent Bricks](https://docs.databricks.com/aws/en/generative-ai/agent-bricks/multi-agent-supervisor) is Databricks' framework for building production AI agents with minimal code. It provides pre-built patterns—like the **Multi-Agent Supervisor**—that handle the complexity of orchestrating multiple tools and agents.
+
+### What is Agent Bricks?
+
+Agent Bricks takes a declarative approach to agent development. Instead of writing orchestration logic, you describe what you want and Agent Bricks handles:
+
+- **Human-led optimization** — Subject matter experts provide natural language feedback ("the agent should ask clarifying questions before searching") and Agent Bricks automatically adjusts agent behavior, prompts, and coordination logic
+- **Task delegation** — Routes requests to the appropriate tools or sub-agents
+- **Parallel execution** — Runs independent operations concurrently
+- **Result synthesis** — Combines outputs from multiple tools into coherent responses
+- **Access control** — Enforces Unity Catalog permissions so users only access what they're authorized for
+
+### Continuous Improvement from Human Feedback
+
+Agent Bricks enables a feedback loop where domain experts—not just developers—can improve agent behavior:
+
+1. **Observe** — Review agent traces and outputs in the Databricks UI
+2. **Feedback** — Provide natural language corrections ("when users ask about patients, always confirm the spelling")
+3. **Optimize** — Agent Bricks automatically updates prompts and routing logic
+4. **Deploy** — Changes apply immediately without code changes
+
+This closes the gap between AI development and business expertise, allowing healthcare specialists, financial analysts, or operations teams to directly shape agent behavior.
+
+### How It Fits This Framework
+
+The UC Functions you create (echo, calculator, custom agents) become building blocks that Agent Bricks can orchestrate:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                   Multi-Agent Supervisor                        │
+│                      (Agent Bricks)                             │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │
+          ┌─────────────────┼─────────────────┐
+          ▼                 ▼                 ▼
+    ┌───────────┐     ┌───────────┐     ┌───────────┐
+    │echo_agent │     │calculator_│     │epic_      │
+    │ UC Func   │     │agent      │     │patient_   │
+    │           │     │ UC Func   │     │search     │
+    └─────┬─────┘     └─────┬─────┘     └───────────┘
+          │                 │                 │
+          ▼                 ▼                 │
+    ┌───────────┐     ┌───────────┐           │
+    │Echo Agent │     │Calculator │    (Stub API)
+    │ DBX App   │     │  DBX App  │
+    │ MLflow    │     │  MLflow   │
+    └───────────┘     └───────────┘
+          │                 │                 │
+          └─────────────────┴─────────────────┘
+                            │
+                    Databricks Managed MCP
+```
+
+### Getting Started
+
+1. Register your UC Functions as MCP tools (Steps 1-2 above)
+2. Create a Multi-Agent Supervisor in Databricks
+3. Add your UC Functions as sub-agents
+4. Deploy — Agent Bricks creates a unified endpoint for your application
+
+For detailed setup, see the [Agent Bricks documentation](https://docs.databricks.com/aws/en/generative-ai/agent-bricks/multi-agent-supervisor).
+
+---
+
+## File Structure
+
+```
+├── apps/
+│   ├── echo/                     # Echo Agent (Databricks App)
+│   │   ├── agent.py              # MLflow ResponsesAgent implementation
+│   │   ├── start_server.py       # AgentServer startup
+│   │   ├── app.yaml              # Databricks App config
+│   │   └── requirements.txt
+│   └── calculator/               # Calculator Agent (Databricks App)
+│       ├── agent.py              # MLflow ResponsesAgent implementation
+│       ├── start_server.py       # AgentServer startup
+│       ├── app.yaml              # Databricks App config
+│       └── requirements.txt
+├── src/
+│   ├── agents/
+│   │   ├── databricks/           # Databricks agents using MCP tools
+│   │   └── foundry/              # Foundry MCP integration
+│   └── mcp/
+│       └── functions/            # UC Function definitions
+├── notebooks/
+│   └── register_uc_functions.py  # Register UC Functions (wrappers for agents)
+├── infra/
+│   ├── main.tf                   # Azure Databricks + AI Foundry
+│   └── Makefile
+├── tests/                        # Unit tests
+├── .env.example                  # Configuration template
+├── Makefile                      # Development commands
+└── databricks.yml                # Databricks Asset Bundle config (apps + notebooks)
+```
+
+---
+
+## Makefile Commands
 
 | Command | Description |
 |---------|-------------|
-| `make deploy` | Deploy bundle + restart apps |
-| `make status` | Check app status and URLs |
-| `make stop` | Stop all apps |
-| `make start` | Start all apps |
-| `make destroy` | Remove all resources |
+| `make setup` | Create .env from template |
+| `make deploy-infra` | Phase 1: Deploy Azure infrastructure (Databricks + Foundry) |
+| `make deploy-uc` | Phase 2: Deploy UC resources + apps + notebook (after metastore assignment) |
+| `make deploy-bundle` | Deploy bundle, start apps, update env, grant permissions |
+| `make deploy-apps` | Deploy/redeploy agents as Databricks Apps |
+| `make create-sp-secret` | Create OAuth secret for Service Principal |
+| `make grant-sp-permission` | Grant SP permission on apps |
+| `make destroy-infra` | Destroy Azure infrastructure |
+| `make clean-bundle-state` | Clean Databricks bundle state (fixes stale state issues) |
 
-## Demo Notebooks
+---
 
-After deployment, run the interactive demo notebooks in your Databricks workspace:
+## Quick Setup: Expose an Agent via MCP
 
-**Location:** `/Workspace/Users/<your-email>/.bundle/a2a-gateway/dev/files/notebooks/`
+To wrap a Databricks App agent as an MCP tool:
 
-### a2a_demo.py - A2A Protocol Demo
+1. **Deploy infrastructure** — `make deploy-infra` then `make deploy-uc`
+2. **Create Service Principal** — Terraform creates `mcp-interop-agent-caller` SP with OAuth secret
+3. **Grant SP permission on app** — `CAN_USE` permission on your Databricks App
+4. **Create HTTP Connection** — OAuth M2M connection using SP credentials from secret scope
+5. **Register UC Function** — SQL function using `http_request()` with the connection
+6. **Call via MCP** — `POST /api/2.0/mcp/functions/{catalog}/{schema}/{function}`
 
-Demonstrates A2A protocol features using the official A2A SDK:
-- Agent Discovery via `A2ACardResolver`
-- Agent Card inspection
-- Synchronous messaging via `A2AClient`
-- SSE Streaming
-- Multi-agent orchestration
-- A2A Client as LangChain tool pattern
+The notebook (`register_uc_functions.py`) handles steps 4-5 automatically after infrastructure is deployed.
 
-### a2a_agent_deploy.py - Deploy to Mosaic AI Framework
+---
 
-Deploys an A2A orchestrator agent to Databricks Mosaic AI Framework:
-- Build agent with LangChain/LangGraph + A2A SDK tools
-- Log to MLflow (models-from-code pattern)
-- Register to Unity Catalog
-- Deploy with `agents.deploy()`
-- Creates Model Serving endpoint with autoscaling, Review App, and inference tables
+## Known Limitations
 
-### Example Prompts
+| Limitation | Description | Status |
+|------------|-------------|--------|
+| **OAuth token generation in notebooks** | Notebooks cannot programmatically generate OAuth secrets for Service Principals. Secrets must be created via Terraform/CLI. | Tracked internally |
+| **HTTP Connections block U2M** | UC HTTP Connections using `http_request()` in SQL do not support User-to-Machine (U2M) authentication. Use OAuth M2M (Service Principal) instead. | Platform limitation |
+| **SP permission via CLI** | Granting app permissions to SPs requires using the application_id as `service_principal_name` in API calls. | Workaround documented |
 
-**Echo Agent** - Test connectivity and message handling:
-```
-"Hello from A2A!"
-"Test message with special chars: @#$%^&*()"
-"Echo this back to me please"
-```
+---
 
-**Calculator Agent** - Arithmetic operations:
-```
-"Add 15 and 27"
-"Multiply 6 by 7"
-"Divide 100 by 4"
-"What is 25 times 4?"
-```
+## References
 
-**Combined Multi-Agent Workflow**:
-```python
-# 1. Discover available agents
-agents = list_agents()
-
-# 2. Verify connectivity with Echo
-echo_response = send_message("marcin-echo", "System check")
-
-# 3. Perform calculation
-calc_response = send_message("marcin-calculator", "Multiply 1250 by 12")
-
-# 4. Use streaming for real-time feedback
-stream_message("marcin-calculator", "Add 100 and 200")
-```
-
-### Assistant Agent (Optional)
-
-The Assistant Agent is an orchestrator that can discover and use other agents automatically. To deploy it, uncomment the `assistant_agent` section in `databricks.yml` and redeploy.
-
-**Example prompts for Assistant Agent:**
-```
-"What agents are available?"
-"Calculate 15 plus 27 for me"
-"Echo hello world"
-"First discover agents, then calculate 100 divided by 5"
-```
-
-## Service Principal Authentication
-
-For programmatic/automated access to the A2A Gateway and agents from notebooks or scripts, use a Service Principal instead of user OAuth tokens.
-
-See **[notebooks/README.md](notebooks/README.md#programmatic-access-with-service-principals)** for detailed instructions on:
-- Creating a Service Principal
-- Generating OAuth secrets
-- Granting app and UC connection access
-- Using `WorkspaceClient` with SP credentials
-
-## Testing
-
-```bash
-make test PREFIX=$PREFIX
-```
-
-See [tests/README.md](tests/README.md) for details.
-
-## Experimental Features
-
-### MLflow Tracing (Unity Catalog)
-
-Trace all gateway requests with rich metadata including agent, user, and gateway context. Traces are stored in Unity Catalog Delta tables for analysis and monitoring.
-
-**Configuration** (`gateway/app.yaml`):
-```yaml
-env:
-  - name: TRACING_ENABLED
-    value: "true"
-  - name: MLFLOW_EXPERIMENT_NAME
-    value: "/Shared/a2a-gateway-traces"
-  - name: TRACE_UC_SCHEMA
-    value: "a2a.gateway"
-```
-
-**Required Setup** (handled automatically by DAB):
-1. MLflow experiment `/Shared/a2a-gateway-traces` with app service principal permissions
-2. Unity Catalog `a2a` with `USE_CATALOG` grant
-3. Schema `a2a.gateway` with `USE_SCHEMA`, `CREATE_TABLE`, `SELECT`, `MODIFY` grants
-
-The experiment must exist before the app starts (app will fail fast if not found).
-
-**Trace Tags**:
-| Tag | Description |
-|-----|-------------|
-| `gateway.version` | Gateway version |
-| `gateway.environment` | Environment (dev/staging/prod) |
-| `gateway.instance_id` | Unique gateway instance ID |
-| `request.id` | Unique request correlation ID |
-| `request.type` | Request type (gateway/agent_proxy) |
-| `user.email` | Caller's email (from OBO headers) |
-| `agent.name` | Target agent name |
-| `agent.method` | A2A method called |
-
-**Optional**: Set `MLFLOW_TRACING_SQL_WAREHOUSE_ID` for production monitoring queries.
-
-**Reference**: [Databricks MLflow Tracing with Unity Catalog](https://docs.databricks.com/aws/en/mlflow3/genai/tracing/trace-unity-catalog)
-
-## Known Issues
-
-| # | Issue | Status |
-|---|-------|--------|
-| 1 | OAuth token manual passthrough required for OBO auth from Databricks notebooks to Databricks Apps | Tracked internally |
-| 2 | Enable agent discovery without requiring `-a2a` suffix on connection names | Open (non-blocking) |
-| 3 | Fix swagger documentation to support OAuth token injection from the UI via OBO | Open (non-blocking) |
-| 4 | Move standardized functions for agent discovery and usage to UC functions with Agent Framework and OBO | Open (non-blocking) |
-| 5 | Streamline configuration: consolidate duplicate settings across `app.yaml`, `databricks.yml`, and `Makefile` (catalog names, schema names, prefixes) into a single source of truth | TODO |
+- [Databricks Managed MCP](https://docs.databricks.com/aws/en/generative-ai/mcp/managed-mcp)
+- [Agent Bricks: Multi-Agent Supervisor](https://docs.databricks.com/aws/en/generative-ai/agent-bricks/multi-agent-supervisor)
+- [Azure AI Foundry MCP](https://learn.microsoft.com/en-us/azure/ai-foundry/agents/how-to/tools-classic/model-context-protocol)
+- [MCP Specification](https://spec.modelcontextprotocol.io/)
+- [Unity Catalog HTTP Connections](https://learn.microsoft.com/en-us/azure/databricks/query-federation/http)
+- [Unity Catalog Audit Logs](https://docs.databricks.com/en/administration-guide/account-settings/audit-logs.html)
