@@ -238,7 +238,7 @@ def matches(patient, family, given, dob):
     return True
 
 results = [p for p in STUB_PATIENTS if matches(p, family_name, given_name or "", birthdate or "")]
-return json.dumps({{"resourceType": "Bundle", "type": "searchset", "total": len(results), "entry": [{{"resource": p}} for p in results]}})
+return "[EpicFHIR] " + json.dumps({{"resourceType": "Bundle", "type": "searchset", "total": len(results), "entry": [{{"resource": p}} for p in results]}})
 $$
 """)
 print("Registered: epic_patient_search")
@@ -306,10 +306,10 @@ RETURN (
     SELECT
         CASE
             WHEN get_json_object(result.text, '$.choices[0].message.content') IS NOT NULL
-            THEN get_json_object(result.text, '$.choices[0].message.content')
+            THEN concat('[AzureFoundry] ', get_json_object(result.text, '$.choices[0].message.content'))
             WHEN get_json_object(result.text, '$.error.message') IS NOT NULL
-            THEN concat('Azure Error: ', get_json_object(result.text, '$.error.message'))
-            ELSE concat('Unexpected response (', result.status_code, '): ', substring(result.text, 1, 500))
+            THEN concat('[AzureFoundry] Error: ', get_json_object(result.text, '$.error.message'))
+            ELSE concat('[AzureFoundry] Unexpected response (', result.status_code, '): ', substring(result.text, 1, 500))
         END
     FROM (
         SELECT http_request(

@@ -193,23 +193,7 @@ SELECT mcp_agents.tools.epic_patient_search('Argonaut', 'Jason', NULL);
 SELECT mcp_agents.tools.epic_patient_search('Smith', NULL, NULL);
 ```
 
-### 3b. Makefile
-
-```bash
-# Test echo agent via MCP
-make test-echo
-
-# Test calculator agent via MCP
-make test-calculator
-
-# Test Epic FHIR stub via MCP
-make test-fhir
-
-# Test all
-make test
-```
-
-### 3c. Python
+### 3b. Python
 
 ```python
 from src.agents.databricks import DatabricksMCPAgent
@@ -229,7 +213,7 @@ result = agent.call_function("epic_patient_search", family_name="Argonaut")
 print(result)
 ```
 
-### 3d. curl
+### 3c. curl
 
 ```bash
 # Get token
@@ -669,12 +653,12 @@ For detailed setup, see the [Agent Bricks documentation](https://docs.databricks
 | `make setup` | Create .env from template |
 | `make deploy-infra` | Phase 1: Deploy Azure infrastructure (Databricks + Foundry) |
 | `make deploy-uc` | Phase 2: Deploy UC resources + apps + notebook (after metastore assignment) |
-| `make deploy-apps` | Deploy/redeploy A2A agents as Databricks Apps |
+| `make deploy-bundle` | Deploy bundle, start apps, update env, grant permissions |
+| `make deploy-apps` | Deploy/redeploy agents as Databricks Apps |
+| `make create-sp-secret` | Create OAuth secret for Service Principal |
+| `make grant-sp-permission` | Grant SP permission on apps |
 | `make destroy-infra` | Destroy Azure infrastructure |
-| `make test-echo` | Test echo_agent function via MCP |
-| `make test-calculator` | Test calculator_agent function via MCP |
-| `make test-fhir` | Test epic_patient_search function via MCP |
-| `make test` | Run all MCP tests |
+| `make clean-bundle-state` | Clean Databricks bundle state (fixes stale state issues) |
 
 ---
 

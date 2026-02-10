@@ -79,8 +79,8 @@ async def invoke(request: ResponsesAgentRequest) -> ResponsesAgentResponse:
     expression = extract_user_message(messages)
     result = parse_and_calculate(expression)
 
-    # Include SP info to prove auth worked
-    response_text = f"[SP: {sp_info.user_name}] {result}"
+    # Include agent type and SP info
+    response_text = f"[Databricks] {result}"
 
     # ResponsesAgentResponse requires id and output_text content type
     return ResponsesAgentResponse(
@@ -104,7 +104,7 @@ async def stream(request: ResponsesAgentRequest) -> AsyncGenerator[ResponsesAgen
     expression = extract_user_message(messages)
     result = parse_and_calculate(expression)
 
-    response_text = f"[SP: {sp_info.user_name}] {result}"
+    response_text = f"[Databricks] {result}"
 
     # Stream the response with proper format (id and output_text content type)
     yield ResponsesAgentStreamEvent(

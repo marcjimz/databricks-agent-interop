@@ -1,7 +1,7 @@
 # Databricks Agent Interoperability Framework
 # MCP + Unity Catalog
 
-.PHONY: help setup check-deps check-env deploy-infra deploy-uc destroy-infra deploy-bundle deploy-apps deploy-app-code start-apps wait-for-deployment update-agent-env grant-sp-permission create-sp-secret test-calculator test-fhir test-foundry test install unit-test lint format clean clean-bundle-state outputs
+.PHONY: help setup check-deps check-env deploy-infra deploy-uc destroy-infra deploy-bundle deploy-apps deploy-app-code start-apps wait-for-deployment update-agent-env grant-sp-permission create-sp-secret install unit-test lint format clean clean-bundle-state outputs
 
 # Load environment variables from .env
 ifneq (,$(wildcard .env))
@@ -36,10 +36,6 @@ help:
 	@echo "  make outputs            Show Terraform outputs"
 	@echo ""
 	@echo "Testing:"
-	@echo "  make test-calculator    Test calculator_agent function via MCP"
-	@echo "  make test-fhir          Test epic_patient_search function via MCP"
-	@echo "  make test-foundry       Test foundry_chat_agent function via MCP"
-	@echo "  make test               Run all MCP function tests"
 	@echo "  make unit-test          Run Python unit tests"
 	@echo ""
 	@echo "Development:"
@@ -336,36 +332,6 @@ create-sp-secret: check-databricks
 	echo "Storing secret in scope: mcp-agent-oauth" && \
 	databricks secrets put-secret mcp-agent-oauth client-secret --string-value "$$CLIENT_SECRET" && \
 	echo "Done! Secret stored in mcp-agent-oauth/client-secret"
-
-# =============================================================================
-# Testing
-# =============================================================================
-
-test-calculator: check-databricks
-	@echo "Testing calculator_agent function via MCP..."
-	@TOKEN=$$(databricks auth token --host $(DATABRICKS_HOST) | jq -r '.access_token') && \
-	curl -s -X POST "$(DATABRICKS_HOST)/api/2.0/mcp/functions/$(UC_CATALOG)/$(UC_SCHEMA)/calculator_agent" \
-		-H "Authorization: Bearer $$TOKEN" \
-		-H "Content-Type: application/json" \
-		-d '{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"$(UC_CATALOG)__$(UC_SCHEMA)__calculator_agent","arguments":{"expression":"add 5 and 3"}}}' | jq
-
-test-fhir: check-databricks
-	@echo "Testing epic_patient_search function via MCP..."
-	@TOKEN=$$(databricks auth token --host $(DATABRICKS_HOST) | jq -r '.access_token') && \
-	curl -s -X POST "$(DATABRICKS_HOST)/api/2.0/mcp/functions/$(UC_CATALOG)/$(UC_SCHEMA)/epic_patient_search" \
-		-H "Authorization: Bearer $$TOKEN" \
-		-H "Content-Type: application/json" \
-		-d '{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"$(UC_CATALOG)__$(UC_SCHEMA)__epic_patient_search","arguments":{"family_name":"Argonaut","given_name":"","birthdate":""}}}' | jq
-
-test-foundry: check-databricks
-	@echo "Testing foundry_chat_agent function via MCP..."
-	@TOKEN=$$(databricks auth token --host $(DATABRICKS_HOST) | jq -r '.access_token') && \
-	curl -s -X POST "$(DATABRICKS_HOST)/api/2.0/mcp/functions/$(UC_CATALOG)/$(UC_SCHEMA)/foundry_chat_agent" \
-		-H "Authorization: Bearer $$TOKEN" \
-		-H "Content-Type: application/json" \
-		-d '{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"$(UC_CATALOG)__$(UC_SCHEMA)__foundry_chat_agent","arguments":{"message":"What is 2 + 2? Answer briefly."}}}' | jq
-
-test: test-calculator test-fhir test-foundry
 
 # =============================================================================
 # Development
