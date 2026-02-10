@@ -492,3 +492,55 @@ print(f"""
 - Calculator token endpoint: {TOKEN_ENDPOINT}
 - Foundry token endpoint: {AZURE_TOKEN_ENDPOINT}
 """)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Step 8: Audit & Governance
+# MAGIC
+# MAGIC Unity Catalog logs all function access. Use these queries to monitor MCP tool usage.
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### View Function Access (Audit Logs)
+# MAGIC
+# MAGIC `system.access.audit` tracks when functions are accessed via `getFunction` action.
+
+# COMMAND ----------
+
+spark.sql(f"""
+SELECT
+    event_time,
+    user_identity.email as user,
+    request_params.full_name_arg as function_name,
+    source_ip_address,
+    user_agent
+FROM system.access.audit
+WHERE action_name = 'getFunction'
+  AND request_params.full_name_arg LIKE '{CATALOG}.{SCHEMA}.%'
+ORDER BY event_time DESC
+LIMIT 100
+""").display()
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### View Function Permission Grants
+# MAGIC
+# MAGIC Uses `information_schema.routine_privileges` to show who has access to functions.
+
+# COMMAND ----------
+
+# Query routine (function) privileges
+spark.sql(f"""
+SELECT
+    grantee,
+    privilege_type,
+    routine_name,
+    inherited_from
+FROM system.information_schema.routine_privileges
+WHERE routine_catalog = '{CATALOG}'
+  AND routine_schema = '{SCHEMA}'
+ORDER BY routine_name, grantee
+""").display()

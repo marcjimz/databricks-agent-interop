@@ -568,11 +568,22 @@ Copilot: [Calling MCP tool: calculator]
 
 Agent Bricks takes a declarative approach to agent development. Instead of writing orchestration logic, you describe what you want and Agent Bricks handles:
 
-- **Automatic optimization** — Improves agent coordination based on natural language feedback from subject matter experts
+- **Human-led optimization** — Subject matter experts provide natural language feedback ("the agent should ask clarifying questions before searching") and Agent Bricks automatically adjusts agent behavior, prompts, and coordination logic
 - **Task delegation** — Routes requests to the appropriate tools or sub-agents
 - **Parallel execution** — Runs independent operations concurrently
 - **Result synthesis** — Combines outputs from multiple tools into coherent responses
 - **Access control** — Enforces Unity Catalog permissions so users only access what they're authorized for
+
+### Continuous Improvement from Human Feedback
+
+Agent Bricks enables a feedback loop where domain experts—not just developers—can improve agent behavior:
+
+1. **Observe** — Review agent traces and outputs in the Databricks UI
+2. **Feedback** — Provide natural language corrections ("when users ask about patients, always confirm the spelling")
+3. **Optimize** — Agent Bricks automatically updates prompts and routing logic
+4. **Deploy** — Changes apply immediately without code changes
+
+This closes the gap between AI development and business expertise, allowing healthcare specialists, financial analysts, or operations teams to directly shape agent behavior.
 
 ### How It Fits This Framework
 
