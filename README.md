@@ -53,21 +53,21 @@ databricks --version
     Agents                 Foundry                  Client
 
 
-┌─────────────────── UC Functions as Wrappers ───────────────────────┐
-│                                                                     │
-│   ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐│
-│   │   echo_agent    │    │calculator_agent │    │epic_patient_    ││
-│   │   (UC Func)     │    │   (UC Func)     │    │search (UC Func) ││
-│   └────────┬────────┘    └────────┬────────┘    └────────┬────────┘│
-│            │                      │                      │          │
-│            ▼                      ▼                      ▼          │
-│   ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐│
-│   │  Echo Agent     │    │Calculator Agent │    │  Epic FHIR      ││
-│   │ (Databricks App)│    │(Databricks App) │    │  (Stub API)     ││
-│   │ ResponsesAgent  │    │ ResponsesAgent  │    │                 ││
-│   └─────────────────┘    └─────────────────┘    └─────────────────┘│
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
+┌────────────────────── UC Functions as Wrappers ────────────────────────┐
+│                                                                        │
+│  ┌─────────────────┐   ┌─────────────────┐   ┌─────────────────────┐   │
+│  │   echo_agent    │   │  foundry_agent  │   │ epic_patient_search │   │
+│  │   (UC Func)     │   │   (UC Func)     │   │     (UC Func)       │   │
+│  └────────┬────────┘   └────────┬────────┘   └──────────┬──────────┘   │
+│           │                     │                       │              │
+│           ▼                     ▼                       ▼              │
+│  ┌─────────────────┐   ┌─────────────────┐   ┌─────────────────────┐   │
+│  │   Echo Agent    │   │  Foundry Agent  │   │     Epic FHIR       │   │
+│  │(Databricks App) │   │ (Azure AI       │   │    (Stub API)       │   │
+│  │ ResponsesAgent  │   │  Foundry)       │   │                     │   │
+│  └─────────────────┘   └─────────────────┘   └─────────────────────┘   │
+│                                                                        │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -587,7 +587,7 @@ This closes the gap between AI development and business expertise, allowing heal
 
 ### How It Fits This Framework
 
-The UC Functions you create (echo, calculator, custom agents) become building blocks that Agent Bricks can orchestrate:
+The UC Functions you create (echo, foundry, custom agents) become building blocks that Agent Bricks can orchestrate:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -598,16 +598,16 @@ The UC Functions you create (echo, calculator, custom agents) become building bl
           ┌─────────────────┼─────────────────┐
           ▼                 ▼                 ▼
     ┌───────────┐     ┌───────────┐     ┌───────────┐
-    │echo_agent │     │calculator_│     │epic_      │
-    │ UC Func   │     │agent      │     │patient_   │
+    │echo_agent │     │ foundry_  │     │epic_      │
+    │ UC Func   │     │  agent    │     │patient_   │
     │           │     │ UC Func   │     │search     │
     └─────┬─────┘     └─────┬─────┘     └───────────┘
           │                 │                 │
           ▼                 ▼                 │
     ┌───────────┐     ┌───────────┐           │
-    │Echo Agent │     │Calculator │    (Stub API)
-    │ DBX App   │     │  DBX App  │
-    │ MLflow    │     │  MLflow   │
+    │Echo Agent │     │  Foundry  │    (Stub API)
+    │ DBX App   │     │   Agent   │
+    │ MLflow    │     │(AI Fndry) │
     └───────────┘     └───────────┘
           │                 │                 │
           └─────────────────┴─────────────────┘
