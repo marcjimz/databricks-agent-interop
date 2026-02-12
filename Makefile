@@ -1,7 +1,7 @@
 # Databricks Agent Interoperability Framework
 # MCP + Unity Catalog
 
-.PHONY: help setup check-deps check-env deploy-infra deploy-uc destroy-infra deploy-bundle deploy-apps deploy-app-code start-apps wait-for-deployment update-agent-env grant-sp-permission create-sp-secret deploy-foundry-agent delete-foundry-agent install unit-test lint format clean clean-bundle-state outputs sync-tf-state
+.PHONY: help setup check-deps check-env deploy-infra deploy-uc destroy-infra deploy-bundle deploy-apps deploy-app-code start-apps wait-for-deployment update-agent-env grant-sp-permission create-sp-secret deploy-foundry-agent delete-foundry-agent deploy-mcp-agent delete-mcp-agent test-mcp-local install unit-test lint format clean clean-bundle-state outputs sync-tf-state
 
 # Load environment variables from .env
 ifneq (,$(wildcard .env))
@@ -19,20 +19,28 @@ UC_SCHEMA ?= tools
 help:
 	@echo "Databricks Agent Interoperability Framework"
 	@echo ""
-	@echo "=== Deployment ==="
-	@echo "  make deploy-infra       Phase 1: Deploy Azure resources (Databricks + AI Foundry)"
-	@echo "  make deploy-uc          Phase 2: Deploy Unity Catalog + Databricks Apps"
-	@echo "  make destroy-infra      Destroy all Azure resources"
+	@echo "=== Deployment Flow ==="
+	@echo "  1. make deploy-infra        Deploy Azure resources (Databricks + AI Foundry)"
+	@echo "  2. Assign metastore         Manual step in Databricks account console"
+	@echo "  3. make deploy-foundry-agent Deploy gpt-4o model + simple chat agent"
+	@echo "  4. make deploy-uc           Deploy Unity Catalog + Databricks Apps"
+	@echo "  5. Run notebook             Register UC functions and test"
 	@echo ""
-	@echo "=== Foundry + Databricks MCP (see foundry/README.md) ==="
-	@echo "  make test-mcp-local     Test MCP connection locally"
-	@echo "  make deploy-mcp-agent   Deploy agent to Foundry portal"
-	@echo "  make delete-mcp-agent   Delete agent from Foundry portal"
+	@echo "=== Commands ==="
+	@echo "  make deploy-infra         Deploy Azure infrastructure"
+	@echo "  make deploy-foundry-agent Deploy Foundry agent (model + agent)"
+	@echo "  make deploy-uc            Deploy Unity Catalog assets"
+	@echo "  make destroy-infra        Destroy all Azure resources"
+	@echo ""
+	@echo "=== Foundry Agents ==="
+	@echo "  make deploy-mcp-agent     Deploy MCP-enabled agent to Foundry portal"
+	@echo "  make delete-mcp-agent     Delete MCP-enabled agent from Foundry portal"
+	@echo "  make test-mcp-local       Test MCP connection locally"
 	@echo ""
 	@echo "=== Development ==="
-	@echo "  make setup              Create .env from template"
-	@echo "  make install            Install Python dependencies"
-	@echo "  make clean              Clean cache files"
+	@echo "  make setup                Create .env from template"
+	@echo "  make install              Install Python dependencies"
+	@echo "  make clean                Clean cache files"
 	@echo ""
 	@echo "=== Current Configuration ==="
 	@echo "  DATABRICKS_HOST=$(DATABRICKS_HOST)"
@@ -98,7 +106,8 @@ deploy-infra: check-env
 	@echo "Next steps:"
 	@echo "  1. Go to https://accounts.azuredatabricks.net"
 	@echo "  2. Assign a metastore to workspace: $(DATABRICKS_HOST)"
-	@echo "  3. Run: make deploy-uc"
+	@echo "  3. Run: make deploy-foundry-agent"
+	@echo "  4. Run: make deploy-uc"
 
 # =============================================================================
 # Infrastructure - Phase 2: Unity Catalog + Apps
@@ -178,12 +187,12 @@ update-env-from-terraform:
 	fi
 	@PROJECT_URL=$$(cd infra && terraform output -raw project_endpoint 2>/dev/null) && \
 	if [ -n "$$PROJECT_URL" ]; then \
-		if grep -q "^PROJECT_ENDPOINT=" .env 2>/dev/null; then \
-			sed -i.bak "s|^PROJECT_ENDPOINT=.*|PROJECT_ENDPOINT=$$PROJECT_URL|" .env && rm -f .env.bak; \
+		if grep -q "^AZURE_AI_PROJECT_ENDPOINT=" .env 2>/dev/null; then \
+			sed -i.bak "s|^AZURE_AI_PROJECT_ENDPOINT=.*|AZURE_AI_PROJECT_ENDPOINT=$$PROJECT_URL|" .env && rm -f .env.bak; \
 		else \
-			echo "PROJECT_ENDPOINT=$$PROJECT_URL" >> .env; \
+			echo "AZURE_AI_PROJECT_ENDPOINT=$$PROJECT_URL" >> .env; \
 		fi; \
-		echo "Set PROJECT_ENDPOINT=$$PROJECT_URL"; \
+		echo "Set AZURE_AI_PROJECT_ENDPOINT=$$PROJECT_URL"; \
 	fi
 
 # =============================================================================
@@ -285,11 +294,12 @@ update-agent-env: check-databricks
 		echo "UC_CATALOG=$(UC_CATALOG)" >> notebooks/.env && \
 		echo "UC_SCHEMA=$(UC_SCHEMA)" >> notebooks/.env && \
 		echo "" >> notebooks/.env && \
-		echo "# Agent URLs" >> notebooks/.env && \
+		echo "# Databricks Agent URLs" >> notebooks/.env && \
 		echo "CALCULATOR_AGENT_URL=$$CALC_URL" >> notebooks/.env && \
 		echo "" >> notebooks/.env && \
-		echo "# Azure AI Foundry (OAuth via Entra ID)" >> notebooks/.env && \
-		echo "FOUNDRY_ENDPOINT=$(FOUNDRY_ENDPOINT)" >> notebooks/.env && \
+		echo "# Azure AI Foundry Agent" >> notebooks/.env && \
+		echo "AZURE_AI_PROJECT_ENDPOINT=$(AZURE_AI_PROJECT_ENDPOINT)" >> notebooks/.env && \
+		echo "FOUNDRY_AGENT_ID=$(FOUNDRY_AGENT_ID)" >> notebooks/.env && \
 		echo "TENANT_ID=$(TENANT_ID)" >> notebooks/.env && \
 		echo "Updated notebooks/.env"; \
 	else \
@@ -342,20 +352,13 @@ create-sp-secret: check-databricks
 	echo "Done! Secret stored in mcp-agent-oauth/client-secret"
 
 # =============================================================================
-# Azure AI Foundry Agent
+# Azure AI Foundry Agent (Standalone Project)
 # =============================================================================
 
-deploy-foundry-agent: check-env setup-foundry-connection
+deploy-foundry-agent: check-env
 	@echo "=== Deploying Azure AI Foundry Agent ==="
-	@echo "Installing Foundry agent dependencies..."
-	pip install -q --pre -r foundry/requirements.txt
 	@echo ""
-	@echo "Creating Foundry agent with Databricks MCP tools..."
-	python foundry/deploy_agent.py --create
-
-setup-foundry-connection: check-env setup-databricks-mcp-connection
-	@echo "=== Setting up AI Foundry Connections ==="
-	@echo "Deploying gpt-4o model..."
+	@echo "Step 1: Deploying gpt-4o model to AI Services..."
 	@az cognitiveservices account deployment create \
 		--name ais-$(PREFIX) \
 		--resource-group $(RESOURCE_GROUP) \
@@ -365,30 +368,8 @@ setup-foundry-connection: check-env setup-databricks-mcp-connection
 		--model-format OpenAI \
 		--sku-capacity 10 \
 		--sku-name GlobalStandard 2>/dev/null || echo "gpt-4o deployment already exists"
-	@echo "Creating AI Services connection..."
-	@az ml connection create \
-		--file foundry/ai_services_connection.yaml \
-		--resource-group $(RESOURCE_GROUP) \
-		--workspace-name proj-$(PREFIX) 2>/dev/null || echo "AI Services connection already exists"
-	@echo "Creating Azure OpenAI connection..."
-	@echo '$$schema: https://azuremlschemas.azureedge.net/latest/connection.schema.json' > /tmp/aoai_connection.yaml
-	@echo 'name: aoai-connection' >> /tmp/aoai_connection.yaml
-	@echo 'type: azure_open_ai' >> /tmp/aoai_connection.yaml
-	@echo 'azure_endpoint: https://ais$(PREFIX).cognitiveservices.azure.com/' >> /tmp/aoai_connection.yaml
-	@az ml connection create \
-		--file /tmp/aoai_connection.yaml \
-		--resource-group $(RESOURCE_GROUP) \
-		--workspace-name proj-$(PREFIX) 2>/dev/null || echo "Azure OpenAI connection already exists"
-	@echo "Granting project managed identity permission on AI Services..."
-	@PROJECT_PRINCIPAL=$$(az ml workspace show --name proj-$(PREFIX) --resource-group $(RESOURCE_GROUP) --query identity.principal_id -o tsv 2>/dev/null) && \
-	if [ -n "$$PROJECT_PRINCIPAL" ]; then \
-		az role assignment create \
-			--role "Azure AI Developer" \
-			--assignee-object-id "$$PROJECT_PRINCIPAL" \
-			--assignee-principal-type ServicePrincipal \
-			--scope "/subscriptions/$(SUBSCRIPTION_ID)/resourceGroups/$(RESOURCE_GROUP)/providers/Microsoft.CognitiveServices/accounts/ais-$(PREFIX)" 2>/dev/null || echo "Project role already assigned"; \
-	fi
-	@echo "Granting current user permission on AI Services..."
+	@echo ""
+	@echo "Step 2: Granting current user Cognitive Services permissions..."
 	@USER_ID=$$(az ad signed-in-user show --query id -o tsv 2>/dev/null) && \
 	if [ -n "$$USER_ID" ]; then \
 		az role assignment create \
@@ -398,83 +379,45 @@ setup-foundry-connection: check-env setup-databricks-mcp-connection
 			--scope "/subscriptions/$(SUBSCRIPTION_ID)/resourceGroups/$(RESOURCE_GROUP)/providers/Microsoft.CognitiveServices/accounts/ais-$(PREFIX)" 2>/dev/null || echo "User role already assigned"; \
 	fi
 	@echo ""
-	@echo "=== Connections Configured ==="
-
-setup-databricks-mcp-connection: check-env check-databricks
-	@echo "=== Setting up Databricks MCP Connection with OAuth ==="
-	@MCP_SERVER_URL="$(DATABRICKS_HOST)/api/2.0/mcp/functions/$(UC_CATALOG)/$(UC_SCHEMA)" && \
-	echo "MCP Server URL: $$MCP_SERVER_URL" && \
-	echo "" && \
-	echo "Creating AgenticIdentityToken connection for MCP OAuth..." && \
-	TOKEN=$$(az account get-access-token --resource https://management.azure.com/ --query accessToken -o tsv 2>/dev/null) && \
-	CONNECTION_PAYLOAD='{"properties":{"authType":"AgenticIdentityToken","category":"RemoteTool","target":"'"$$MCP_SERVER_URL"'","audience":"2ff814a6-3304-4ab8-85cb-cd0e6f879c1d","useWorkspaceManagedIdentity":true}}' && \
-	echo "Sending connection request..." && \
-	RESP=$$(curl -s -X PUT \
-		"https://management.azure.com/subscriptions/$(SUBSCRIPTION_ID)/resourceGroups/$(RESOURCE_GROUP)/providers/Microsoft.MachineLearningServices/workspaces/proj-$(PREFIX)/connections/databricks-mcp-connection?api-version=2024-04-01-preview" \
-		-H "Authorization: Bearer $$TOKEN" \
-		-H "Content-Type: application/json" \
-		-d "$$CONNECTION_PAYLOAD") && \
-	if echo "$$RESP" | jq -e '.properties' > /dev/null 2>&1; then \
-		echo "Connection created successfully"; \
+	@echo "Step 3: Deploying simple chat assistant (OpenAI-compatible)..."
+	@pip install -q azure-ai-projects azure-identity
+	@python foundry/deploy_simple_agent.py
+	@echo ""
+	@echo "Step 4: Saving assistant ID to .env..."
+	@AGENT_ID=$$(cat foundry/.simple_agent_id 2>/dev/null) && \
+	if [ -n "$$AGENT_ID" ] && [ "$${AGENT_ID:0:5}" = "asst_" ]; then \
+		if grep -q "^FOUNDRY_AGENT_ID=" .env 2>/dev/null; then \
+			sed -i.bak "s|^FOUNDRY_AGENT_ID=.*|FOUNDRY_AGENT_ID=$$AGENT_ID|" .env && rm -f .env.bak; \
+		elif grep -q "^# FOUNDRY_AGENT_ID=" .env 2>/dev/null; then \
+			sed -i.bak "s|^# FOUNDRY_AGENT_ID=.*|FOUNDRY_AGENT_ID=$$AGENT_ID|" .env && rm -f .env.bak; \
+		else \
+			echo "FOUNDRY_AGENT_ID=$$AGENT_ID" >> .env; \
+		fi; \
+		echo "Set FOUNDRY_AGENT_ID=$$AGENT_ID in .env"; \
 	else \
-		echo "Response: $$RESP"; \
+		echo "Warning: Could not read assistant ID from foundry/.simple_agent_id"; \
 	fi
 	@echo ""
-	@echo "Getting project managed identity..."
-	@PROJECT_PRINCIPAL=$$(az ml workspace show --name proj-$(PREFIX) --resource-group $(RESOURCE_GROUP) --query identity.principal_id -o tsv 2>/dev/null) && \
-	PROJECT_APP_ID=$$(az ad sp show --id "$$PROJECT_PRINCIPAL" --query appId -o tsv 2>/dev/null) && \
-	echo "Project managed identity app ID: $$PROJECT_APP_ID" && \
-	echo "" && \
-	echo "Adding project identity to Databricks..." && \
-	SP_EXISTS=$$(databricks service-principals list --output json 2>/dev/null | jq -r ".[] | select(.applicationId == \"$$PROJECT_APP_ID\") | .id") && \
-	if [ -z "$$SP_EXISTS" ]; then \
-		databricks service-principals create --application-id "$$PROJECT_APP_ID" --display-name "proj-$(PREFIX)-managed-identity" 2>&1 || true; \
-	else \
-		echo "Service principal already exists in Databricks"; \
-	fi && \
-	echo "" && \
-	echo "Granting UC permissions to project identity..." && \
-	databricks grants update catalog $(UC_CATALOG) --json "{\"changes\": [{\"principal\": \"$$PROJECT_APP_ID\", \"add\": [\"USE_CATALOG\"]}]}" 2>&1 || true && \
-	databricks grants update schema $(UC_CATALOG).$(UC_SCHEMA) --json "{\"changes\": [{\"principal\": \"$$PROJECT_APP_ID\", \"add\": [\"USE_SCHEMA\", \"EXECUTE\"]}]}" 2>&1 || true && \
-	echo "UC permissions granted"
-
-setup-databricks-oauth-connection: check-env
-	@echo "=== Setting up Databricks MCP OAuth2 Connection ==="
-	@echo "This creates a proper OAuth2 flow with user consent."
+	@echo "=== Foundry Agent Deployed ==="
+	@echo "The assistant is now available in your Foundry project."
 	@echo ""
-	@echo "Documentation:"
-	@echo "  - Databricks: https://learn.microsoft.com/en-us/azure/databricks/generative-ai/mcp/connect-external-services"
-	@echo "  - Foundry: https://learn.microsoft.com/en-us/azure/ai-foundry/agents/how-to/mcp-authentication"
-	@echo ""
-	python foundry/setup_oauth_connection.py --create
+	@echo "Next: Run 'make deploy-uc' to deploy Unity Catalog assets."
 
-oauth-connection-status: check-env
-	@echo "=== Checking OAuth Connection Status ==="
-	python foundry/setup_oauth_connection.py --status
-
-delete-oauth-connection: check-env
-	@echo "=== Deleting OAuth Connection ==="
-	python foundry/setup_oauth_connection.py --delete
+delete-foundry-agent: check-env
+	@echo "=== Deleting Azure AI Foundry Agent ==="
+	python foundry/deploy_simple_agent.py --delete
 
 test-mcp-local: check-env
 	@echo "=== Testing Foundry + Databricks MCP Locally ==="
 	python foundry/test_mcp_debug.py
 
 deploy-mcp-agent: check-env
-	@echo "=== Deploying Agent to Foundry Portal ==="
+	@echo "=== Deploying MCP-enabled Agent to Foundry Portal ==="
 	python foundry/create_agent.py
 
 delete-mcp-agent: check-env
-	@echo "=== Deleting Agent from Foundry Portal ==="
+	@echo "=== Deleting MCP-enabled Agent from Foundry Portal ==="
 	python foundry/create_agent.py --delete
-
-delete-foundry-agent: check-env
-	@echo "=== Deleting Azure AI Foundry Agent ==="
-	@if [ -z "$(PROJECT_ENDPOINT)" ]; then \
-		echo "Error: PROJECT_ENDPOINT not set in .env"; \
-		exit 1; \
-	fi
-	python foundry/deploy_agent.py --delete
 
 # =============================================================================
 # Development

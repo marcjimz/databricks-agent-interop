@@ -56,13 +56,13 @@ databricks --version
 ┌────────────────────── UC Functions as Wrappers ────────────────────────┐
 │                                                                        │
 │  ┌─────────────────┐   ┌─────────────────┐   ┌─────────────────────┐   │
-│  │   echo_agent    │   │  foundry_agent  │   │ epic_patient_search │   │
+│  │calculator_agent │   │  foundry_agent  │   │ epic_patient_search │   │
 │  │   (UC Func)     │   │   (UC Func)     │   │     (UC Func)       │   │
 │  └────────┬────────┘   └────────┬────────┘   └──────────┬──────────┘   │
 │           │                     │                       │              │
 │           ▼                     ▼                       ▼              │
 │  ┌─────────────────┐   ┌─────────────────┐   ┌─────────────────────┐   │
-│  │   Echo Agent    │   │  Foundry Agent  │   │     Epic FHIR       │   │
+│  │Calculator Agent │   │  Foundry Agent  │   │     Epic FHIR       │   │
 │  │(Databricks App) │   │ (Azure AI       │   │    (Stub API)       │   │
 │  │ ResponsesAgent  │   │  Foundry)       │   │                     │   │
 │  └─────────────────┘   └─────────────────┘   └─────────────────────┘   │
@@ -164,8 +164,8 @@ The notebook registers:
 
 | Function | Description |
 |----------|-------------|
-| `echo_agent` | Calls the Echo Agent (Databricks App) via MLflow `/invocations` endpoint |
 | `calculator_agent` | Calls the Calculator Agent (Databricks App) via MLflow `/invocations` endpoint |
+| `foundry_agent` | Calls a real Azure AI Foundry Agent via the Agents API (threads, runs, messages) |
 | `epic_patient_search` | FHIR Patient search stub (simulates Epic Sandbox API) |
 
 ### Verify Registration
@@ -181,12 +181,12 @@ SHOW FUNCTIONS IN mcp_agents.tools;
 ### 3a. SQL
 
 ```sql
--- Test echo agent (requires agent to be running)
-SELECT mcp_agents.tools.echo_agent('Hello from Databricks!');
-
--- Test calculator agent (requires agent to be running)
+-- Test calculator agent (requires Databricks App running)
 SELECT mcp_agents.tools.calculator_agent('add 5 and 3');
 SELECT mcp_agents.tools.calculator_agent('multiply 10 by 4');
+
+-- Test Foundry agent (requires Foundry agent deployed: make deploy-simple-agent)
+SELECT mcp_agents.tools.foundry_agent('Hello from Databricks!');
 
 -- Test Epic FHIR stub (always works - local stub data)
 SELECT mcp_agents.tools.epic_patient_search('Argonaut', 'Jason', NULL);
@@ -200,12 +200,12 @@ from src.agents.databricks import DatabricksMCPAgent
 
 agent = DatabricksMCPAgent(catalog="mcp_agents", schema="tools")
 
-# Call echo agent
-result = agent.call_function("echo_agent", message="Hello from Python!")
-print(result)
-
 # Call calculator agent
 result = agent.call_function("calculator_agent", expression="add 10 and 5")
+print(result)
+
+# Call Foundry agent (real Azure AI Foundry Agent)
+result = agent.call_function("foundry_agent", message="Hello from Databricks!")
 print(result)
 
 # Search Epic FHIR (stub)
@@ -219,17 +219,6 @@ print(result)
 # Get token
 TOKEN=$(databricks auth token | jq -r '.access_token')
 
-# Call echo agent
-curl -X POST "${DATABRICKS_HOST}/api/2.0/mcp/functions/mcp_agents/tools/echo_agent" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": "1",
-    "method": "tools/call",
-    "params": {"name": "echo_agent", "arguments": {"message": "Hello via MCP!"}}
-  }'
-
 # Call calculator agent
 curl -X POST "${DATABRICKS_HOST}/api/2.0/mcp/functions/mcp_agents/tools/calculator_agent" \
   -H "Authorization: Bearer $TOKEN" \
@@ -239,6 +228,17 @@ curl -X POST "${DATABRICKS_HOST}/api/2.0/mcp/functions/mcp_agents/tools/calculat
     "id": "1",
     "method": "tools/call",
     "params": {"name": "calculator_agent", "arguments": {"expression": "multiply 25 by 4"}}
+  }'
+
+# Call Foundry agent (real Azure AI Foundry Agent)
+curl -X POST "${DATABRICKS_HOST}/api/2.0/mcp/functions/mcp_agents/tools/foundry_agent" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": "1",
+    "method": "tools/call",
+    "params": {"name": "foundry_agent", "arguments": {"message": "Hello via MCP!"}}
   }'
 
 # Search Epic FHIR (stub)
@@ -275,12 +275,12 @@ tools = client.list_tools()
 for t in tools:
     print(f"  {t['name']}: {t.get('description', '')}")
 
-# Call echo agent
-result = client.call_tool("echo_agent", {"message": "Hello from Foundry!"})
-print(result.content)
-
 # Call calculator agent
 result = client.call_tool("calculator_agent", {"expression": "add 15 and 27"})
+print(result.content)
+
+# Call foundry agent (yes, Foundry calling back to itself via Databricks MCP!)
+result = client.call_tool("foundry_agent", {"message": "Hello from Foundry via Databricks!"})
 print(result.content)
 
 # Search patients
@@ -296,11 +296,11 @@ TOKEN=$(az account get-access-token \
   --resource 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d \
   -o tsv --query accessToken)
 
-# Call echo agent
-curl -X POST "https://<workspace>.azuredatabricks.net/api/2.0/mcp/functions/mcp_agents/tools/echo_agent" \
+# Call calculator agent
+curl -X POST "https://<workspace>.azuredatabricks.net/api/2.0/mcp/functions/mcp_agents/tools/calculator_agent" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"echo_agent","arguments":{"message":"Hello from Foundry!"}}}'
+  -d '{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"calculator_agent","arguments":{"expression":"multiply 7 by 8"}}}'
 
 # Search Epic FHIR (stub)
 curl -X POST "https://<workspace>.azuredatabricks.net/api/2.0/mcp/functions/mcp_agents/tools/epic_patient_search" \
@@ -319,12 +319,12 @@ Unity Catalog enforces who can execute MCP tools.
 
 ```sql
 -- Grant to a user
-GRANT EXECUTE ON FUNCTION mcp_agents.tools.echo_agent TO `alice@company.com`;
 GRANT EXECUTE ON FUNCTION mcp_agents.tools.calculator_agent TO `alice@company.com`;
+GRANT EXECUTE ON FUNCTION mcp_agents.tools.foundry_agent TO `alice@company.com`;
 GRANT EXECUTE ON FUNCTION mcp_agents.tools.epic_patient_search TO `alice@company.com`;
 
 -- Grant to a group
-GRANT EXECUTE ON FUNCTION mcp_agents.tools.echo_agent TO `data-science-team`;
+GRANT EXECUTE ON FUNCTION mcp_agents.tools.calculator_agent TO `data-science-team`;
 
 -- Grant to a service principal
 GRANT EXECUTE ON FUNCTION mcp_agents.tools.epic_patient_search TO `my-app-sp`;
@@ -387,31 +387,31 @@ $$;
 
 ### Example: Wrap an Azure AI Foundry Agent
 
+The `foundry_agent` UC Function demonstrates calling a **real Foundry Agent** (not just a model). It uses the Agents API with threads, messages, and runs:
+
 ```sql
-CREATE OR REPLACE FUNCTION mcp_agents.tools.call_foundry_agent(
-    agent_name STRING COMMENT 'Name of the Foundry agent',
-    message STRING COMMENT 'Message to send'
+CREATE OR REPLACE FUNCTION mcp_agents.tools.foundry_agent(
+    message STRING COMMENT 'Message to send to the Azure AI Foundry Agent'
 )
 RETURNS STRING
 LANGUAGE PYTHON
-COMMENT 'MCP Tool: Call an Azure AI Foundry agent'
+COMMENT 'MCP Tool: Chat with a real Azure AI Foundry Agent'
 AS $$
-import json
-import os
-import requests
+import json, time, urllib.request, urllib.parse
 
-foundry_endpoint = os.environ.get("FOUNDRY_ENDPOINT")
-token = os.environ.get("AZURE_TOKEN")
+# Get Azure AD token, then:
+# 1. Create thread:  POST /agents/{name}/threads
+# 2. Add message:    POST /agents/{name}/threads/{id}/messages
+# 3. Run agent:      POST /agents/{name}/threads/{id}/runs
+# 4. Poll status:    GET  /agents/{name}/threads/{id}/runs/{run_id}
+# 5. Get response:   GET  /agents/{name}/threads/{id}/messages
 
-response = requests.post(
-    f"{foundry_endpoint}/agents/{agent_name}/invoke",
-    headers={"Authorization": f"Bearer {token}"},
-    json={"messages": [{"role": "user", "content": message}]}
-)
-
-return json.dumps(response.json())
+# Full implementation in notebooks/register_uc_functions.py
+return call_foundry_agent(message)
 $$;
 ```
+
+Deploy the Foundry agent first: `make deploy-simple-agent`
 
 ---
 
@@ -423,8 +423,8 @@ Once registered, UC Functions are automatically available as MCP tools.
 
 | Tool | Endpoint |
 |------|----------|
-| `echo_agent` | `/api/2.0/mcp/functions/mcp_agents/tools/echo_agent` |
 | `calculator_agent` | `/api/2.0/mcp/functions/mcp_agents/tools/calculator_agent` |
+| `foundry_agent` | `/api/2.0/mcp/functions/mcp_agents/tools/foundry_agent` |
 | `epic_patient_search` | `/api/2.0/mcp/functions/mcp_agents/tools/epic_patient_search` |
 
 ### From a Databricks Agent
@@ -434,11 +434,11 @@ from src.agents.databricks import DatabricksMCPAgent
 
 agent = DatabricksMCPAgent(catalog="mcp_agents", schema="tools")
 
-# Use echo agent
-response = agent.call_function("echo_agent", message="Hello!")
-
 # Use calculator agent
 result = agent.call_function("calculator_agent", expression="add 42 and 2")
+
+# Use foundry agent (calls real Foundry Agent)
+response = agent.call_function("foundry_agent", message="Hello from Databricks!")
 
 # Search patients
 result = agent.call_function("epic_patient_search", family_name="Smith")
@@ -587,7 +587,7 @@ This closes the gap between AI development and business expertise, allowing heal
 
 ### How It Fits This Framework
 
-The UC Functions you create (echo, foundry, custom agents) become building blocks that Agent Bricks can orchestrate:
+The UC Functions you create (calculator, foundry, custom agents) become building blocks that Agent Bricks can orchestrate:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -598,14 +598,14 @@ The UC Functions you create (echo, foundry, custom agents) become building block
           ┌─────────────────┼─────────────────┐
           ▼                 ▼                 ▼
     ┌───────────┐     ┌───────────┐     ┌───────────┐
-    │echo_agent │     │ foundry_  │     │epic_      │
-    │ UC Func   │     │  agent    │     │patient_   │
-    │           │     │ UC Func   │     │search     │
+    │calculator │     │ foundry_  │     │epic_      │
+    │  _agent   │     │  agent    │     │patient_   │
+    │ UC Func   │     │ UC Func   │     │search     │
     └─────┬─────┘     └─────┬─────┘     └───────────┘
           │                 │                 │
           ▼                 ▼                 │
     ┌───────────┐     ┌───────────┐           │
-    │Echo Agent │     │  Foundry  │    (Stub API)
+    │Calculator │     │  Foundry  │    (Stub API)
     │ DBX App   │     │   Agent   │
     │ MLflow    │     │(AI Fndry) │
     └───────────┘     └───────────┘
