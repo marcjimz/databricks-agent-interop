@@ -119,6 +119,11 @@ resource "azurerm_resource_group" "main" {
     purpose    = "mcp-agent-interoperability"
     managed_by = "terraform"
   }
+
+  # Ignore changes to tags added outside Terraform
+  lifecycle {
+    ignore_changes = [tags]
+  }
 }
 
 # =============================================================================
@@ -138,61 +143,10 @@ resource "azurerm_databricks_workspace" "main" {
 }
 
 # =============================================================================
-# Azure AI Foundry Resources
+# Azure AI Foundry Resources (Standalone Project - Agents API compatible)
 # =============================================================================
 
-# Key Vault for AI Foundry
-resource "azurerm_key_vault" "foundry" {
-  name                       = replace("kv${var.prefix}", "-", "")
-  resource_group_name        = azurerm_resource_group.main.name
-  location                   = azurerm_resource_group.main.location
-  tenant_id                  = var.tenant_id
-  sku_name                   = "standard"
-  purge_protection_enabled   = true
-  soft_delete_retention_days = 7
-
-  tags = {
-    purpose = "ai-foundry"
-  }
-}
-
-# Key Vault access policy for current user
-resource "azurerm_key_vault_access_policy" "current" {
-  key_vault_id = azurerm_key_vault.foundry.id
-  tenant_id    = data.azurerm_client_config.current.tenant_id
-  object_id    = data.azurerm_client_config.current.object_id
-
-  key_permissions = [
-    "Create",
-    "Get",
-    "Delete",
-    "Purge",
-    "GetRotationPolicy",
-  ]
-
-  secret_permissions = [
-    "Get",
-    "List",
-    "Set",
-    "Delete",
-    "Purge",
-  ]
-}
-
-# Storage Account for AI Foundry
-resource "azurerm_storage_account" "foundry" {
-  name                     = replace("st${var.prefix}ai", "-", "")
-  resource_group_name      = azurerm_resource_group.main.name
-  location                 = azurerm_resource_group.main.location
-  account_tier             = "Standard"
-  account_replication_type = "LRS"
-
-  tags = {
-    purpose = "ai-foundry"
-  }
-}
-
-# Azure AI Services
+# Azure AI Services account
 resource "azurerm_ai_services" "main" {
   name                  = "ais-${var.prefix}"
   resource_group_name   = azurerm_resource_group.main.name
@@ -209,55 +163,39 @@ resource "azurerm_ai_services" "main" {
   }
 }
 
-# Azure AI Model Deployment (Llama-3.3-70B-Instruct via serverless)
-resource "azurerm_cognitive_deployment" "llama_chat" {
-  name                 = "llama-chat"
-  cognitive_account_id = azurerm_ai_services.main.id
+# Enable project management on AI Services (required for standalone projects)
+resource "azapi_update_resource" "ai_services_project_management" {
+  type        = "Microsoft.CognitiveServices/accounts@2025-04-01-preview"
+  resource_id = azurerm_ai_services.main.id
 
-  model {
-    format  = "Meta"
-    name    = "Llama-3.3-70B-Instruct"
-    version = "9"
-  }
-
-  sku {
-    name     = "GlobalStandard"
-    capacity = 1
+  body = {
+    properties = {
+      allowProjectManagement = true
+    }
   }
 }
 
-# Azure AI Foundry Hub
-resource "azurerm_ai_foundry" "main" {
-  name                = "aihub-${var.prefix}"
-  location            = azurerm_resource_group.main.location
-  resource_group_name = azurerm_resource_group.main.name
-  storage_account_id  = azurerm_storage_account.foundry.id
-  key_vault_id        = azurerm_key_vault.foundry.id
+# Azure AI Foundry Project (standalone - under AI Services account)
+# This creates a Cognitive Services project that supports the Agents API
+resource "azapi_resource" "foundry_project" {
+  type      = "Microsoft.CognitiveServices/accounts/projects@2025-04-01-preview"
+  name      = "proj-${var.prefix}"
+  parent_id = azurerm_ai_services.main.id
+  location  = azurerm_resource_group.main.location
 
   identity {
     type = "SystemAssigned"
+  }
+
+  body = {
+    properties = {}
   }
 
   tags = {
     purpose = "mcp-agent-interoperability"
   }
 
-  depends_on = [azurerm_key_vault_access_policy.current]
-}
-
-# Azure AI Foundry Project
-resource "azurerm_ai_foundry_project" "main" {
-  name               = "proj-${var.prefix}"
-  location           = azurerm_ai_foundry.main.location
-  ai_services_hub_id = azurerm_ai_foundry.main.id
-
-  identity {
-    type = "SystemAssigned"
-  }
-
-  tags = {
-    purpose = "mcp-agent-interoperability"
-  }
+  depends_on = [azapi_update_resource.ai_services_project_management]
 }
 
 # =============================================================================
@@ -265,13 +203,14 @@ resource "azurerm_ai_foundry_project" "main" {
 # =============================================================================
 
 resource "azurerm_storage_account" "unity" {
-  name                     = replace("st${var.prefix}uc", "-", "")
-  resource_group_name      = azurerm_resource_group.main.name
-  location                 = azurerm_resource_group.main.location
-  account_tier             = "Standard"
-  account_replication_type = "LRS"
-  account_kind             = "StorageV2"
-  is_hns_enabled           = true # Required for ADLS Gen2
+  name                          = replace("st${var.prefix}uc", "-", "")
+  resource_group_name           = azurerm_resource_group.main.name
+  location                      = azurerm_resource_group.main.location
+  account_tier                  = "Standard"
+  account_replication_type      = "LRS"
+  account_kind                  = "StorageV2"
+  is_hns_enabled                = true # Required for ADLS Gen2
+  allow_nested_items_to_be_public = false
 
   tags = {
     purpose = "unity-catalog-storage"
@@ -523,23 +462,18 @@ output "foundry_oauth_token_endpoint" {
 }
 
 output "foundry_oauth_scope" {
-  description = "OAuth scope for Azure Cognitive Services"
-  value       = "https://cognitiveservices.azure.com/.default"
-}
-
-output "foundry_hub_id" {
-  description = "AI Foundry Hub resource ID"
-  value       = azurerm_ai_foundry.main.id
+  description = "OAuth scope for Azure AI Foundry"
+  value       = "https://ai.azure.com/.default"
 }
 
 output "foundry_project_id" {
   description = "AI Foundry Project resource ID"
-  value       = azurerm_ai_foundry_project.main.id
+  value       = azapi_resource.foundry_project.id
 }
 
 output "project_endpoint" {
-  description = "Azure AI Foundry project endpoint for Agent Service SDK"
-  value       = "https://${var.location}.api.azureml.ms/"
+  description = "Azure AI Foundry project endpoint for Agent Service SDK (AZURE_AI_PROJECT_ENDPOINT)"
+  value       = "https://${replace("ais${var.prefix}", "-", "")}.services.ai.azure.com/api/projects/${azapi_resource.foundry_project.name}"
 }
 
 output "resource_group" {

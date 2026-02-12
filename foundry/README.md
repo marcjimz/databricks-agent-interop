@@ -100,8 +100,21 @@ make delete-mcp-agent
 | Command | Description |
 |---------|-------------|
 | `make test-mcp-local` | Test MCP connection locally (runs 3 tests) |
-| `make deploy-mcp-agent` | Deploy persistent agent to Foundry portal |
-| `make delete-mcp-agent` | Delete agent from Foundry portal |
+| `make deploy-mcp-agent` | Deploy MCP-enabled agent to Foundry portal |
+| `make delete-mcp-agent` | Delete MCP-enabled agent from Foundry portal |
+| `make deploy-simple-agent` | Deploy simple chat agent (for UC Function demo) |
+| `make delete-simple-agent` | Delete simple chat agent |
+
+## Simple Chat Agent
+
+The `simple-chat-agent` is a basic conversational agent deployed to Foundry that can be called from Databricks UC Functions. This demonstrates **agent-to-agent interoperability** - calling a real Foundry Agent from Databricks.
+
+To deploy:
+```bash
+make deploy-simple-agent
+```
+
+This agent is called by the `foundry_agent` UC Function registered by the notebook. The UC Function handles the full Agents API flow (threads, messages, runs) to call the Foundry Agent.
 
 ## Local Test Details
 

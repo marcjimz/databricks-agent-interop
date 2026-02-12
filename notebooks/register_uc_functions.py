@@ -55,26 +55,33 @@ env_vars = load_env_file()
 dbutils.widgets.text("catalog", env_vars.get("UC_CATALOG", "mcp_agents"), "Catalog")
 dbutils.widgets.text("schema", env_vars.get("UC_SCHEMA", "tools"), "Schema")
 dbutils.widgets.text("calculator_agent_url", env_vars.get("CALCULATOR_AGENT_URL", ""), "Calculator Agent URL")
-dbutils.widgets.text("foundry_endpoint", env_vars.get("FOUNDRY_ENDPOINT", ""), "Foundry Endpoint")
+dbutils.widgets.text("foundry_project_endpoint", env_vars.get("AZURE_AI_PROJECT_ENDPOINT", ""), "Foundry Project Endpoint")
+dbutils.widgets.text("foundry_agent_id", env_vars.get("FOUNDRY_AGENT_ID", ""), "Foundry Agent ID (asst_xxx)")
 dbutils.widgets.text("tenant_id", env_vars.get("TENANT_ID", ""), "Azure Tenant ID")
 
 CATALOG = dbutils.widgets.get("catalog")
 SCHEMA = dbutils.widgets.get("schema")
 CALCULATOR_AGENT_URL = dbutils.widgets.get("calculator_agent_url")
-FOUNDRY_ENDPOINT = dbutils.widgets.get("foundry_endpoint")
+FOUNDRY_PROJECT_ENDPOINT = dbutils.widgets.get("foundry_project_endpoint")
+FOUNDRY_AGENT_ID = dbutils.widgets.get("foundry_agent_id")
 TENANT_ID = dbutils.widgets.get("tenant_id")
 
 # Validate required configuration
 if not CALCULATOR_AGENT_URL:
     raise ValueError("CALCULATOR_AGENT_URL is required. Run 'make deploy-bundle' first.")
-if not FOUNDRY_ENDPOINT:
-    raise ValueError("FOUNDRY_ENDPOINT is required. Check notebooks/.env or run 'make update-agent-env'.")
+if not FOUNDRY_PROJECT_ENDPOINT:
+    raise ValueError("AZURE_AI_PROJECT_ENDPOINT is required. Run 'make deploy-foundry-agent' first.")
+if not FOUNDRY_AGENT_ID:
+    raise ValueError("FOUNDRY_AGENT_ID is required. Run 'make deploy-foundry-agent' and copy the assistant ID.")
+if not FOUNDRY_AGENT_ID.startswith("asst_"):
+    raise ValueError(f"FOUNDRY_AGENT_ID must start with 'asst_', got: {FOUNDRY_AGENT_ID}")
 if not TENANT_ID:
     raise ValueError("TENANT_ID is required for Azure AD OAuth. Check notebooks/.env.")
 
 print(f"Target: {CATALOG}.{SCHEMA}")
 print(f"Calculator Agent URL: {CALCULATOR_AGENT_URL}")
-print(f"Foundry Endpoint: {FOUNDRY_ENDPOINT}")
+print(f"Foundry Project Endpoint: {FOUNDRY_PROJECT_ENDPOINT}")
+print(f"Foundry Agent ID: {FOUNDRY_AGENT_ID}")
 print(f"Tenant ID: {TENANT_ID}")
 
 spark.sql(f"USE CATALOG {CATALOG}")
@@ -248,88 +255,133 @@ print("Registered: epic_patient_search")
 # MAGIC %md
 # MAGIC ## Register Azure AI Foundry Agent
 # MAGIC
-# MAGIC This function wraps an Azure AI Foundry chat completion as a UC Function,
-# MAGIC demonstrating cross-platform agent interoperability via MCP.
+# MAGIC This function calls a **real Azure AI Foundry Agent** (not just a model endpoint),
+# MAGIC demonstrating true cross-platform agent-to-agent interoperability via MCP.
+# MAGIC
+# MAGIC The Python UC Function handles the full Agents API flow:
+# MAGIC 1. Authenticate with Azure AD (Service Principal)
+# MAGIC 2. Create a thread
+# MAGIC 3. Add the user message
+# MAGIC 4. Run the agent
+# MAGIC 5. Poll for completion
+# MAGIC 6. Return the agent's response
 
 # COMMAND ----------
 
-# Setup Foundry HTTP Connection with OAuth M2M (Azure AD)
-# Uses Azure AD Service Principal to authenticate to Azure AI Services.
-# Same pattern as calculator agent - retrieve secrets and pass as literals.
-FOUNDRY_CONNECTION_NAME = "foundry_agent_http"
-
-# Extract host from Foundry endpoint
-match = re.match(r'(https://[^/]+)', FOUNDRY_ENDPOINT)
-if not match:
-    raise ValueError(f"Invalid FOUNDRY_ENDPOINT: {FOUNDRY_ENDPOINT}")
-
-FOUNDRY_HOST = match.group(1)
-AZURE_TOKEN_ENDPOINT = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
-
-# Retrieve Foundry SP credentials from secret scope
+# Get Foundry SP credentials for Python UC Function
+# These are stored in the secret scope and embedded in the function.
 foundry_client_id = dbutils.secrets.get(scope=SECRET_SCOPE, key="foundry-client-id")
 foundry_client_secret = dbutils.secrets.get(scope=SECRET_SCOPE, key="foundry-client-secret")
-print(f"Foundry Host: {FOUNDRY_HOST}")
-print(f"Azure AD Token Endpoint: {AZURE_TOKEN_ENDPOINT}")
 print(f"Retrieved Foundry OAuth credentials from secret scope")
-
-# Create HTTP connection with Azure AD OAuth M2M
-# Using Azure AI model catalog (serverless) - Llama-3.3-70B-Instruct
-spark.sql(f"DROP CONNECTION IF EXISTS {FOUNDRY_CONNECTION_NAME}")
-spark.sql(f"""
-    CREATE CONNECTION {FOUNDRY_CONNECTION_NAME}
-    TYPE HTTP
-    OPTIONS (
-        host '{FOUNDRY_HOST}',
-        base_path '/models',
-        client_id '{foundry_client_id}',
-        client_secret '{foundry_client_secret}',
-        oauth_scope 'https://cognitiveservices.azure.com/.default',
-        token_endpoint '{AZURE_TOKEN_ENDPOINT}'
-    )
-""")
-print(f"Created connection: {FOUNDRY_CONNECTION_NAME}")
+print(f"Foundry Project Endpoint: {FOUNDRY_PROJECT_ENDPOINT}")
+print(f"Foundry Agent ID: {FOUNDRY_AGENT_ID}")
 
 # COMMAND ----------
 
-# Register Foundry chat agent function (SQL with OAuth M2M)
-# Uses UC HTTP Connection with Azure AD authentication.
-# Calls Azure AI model catalog (Llama-3.3-70B-Instruct) via serverless API.
-# Configured to spell out numerical answers (e.g., "four" instead of "4").
+# Register Foundry Agent function (Python)
+# Calls a real Azure AI Foundry Agent using the Agents API.
+# Authenticates with Azure AD Service Principal and handles the full thread/run lifecycle.
 spark.sql(f"""
-CREATE OR REPLACE FUNCTION {CATALOG}.{SCHEMA}.foundry_chat_agent(
-    message STRING COMMENT 'Message to send to the Azure AI chat agent (Llama-3.3-70B)'
+CREATE OR REPLACE FUNCTION {CATALOG}.{SCHEMA}.foundry_agent(
+    message STRING COMMENT 'Message to send to the Azure AI Foundry Agent'
 )
 RETURNS STRING
-COMMENT 'MCP Tool: Chat with Azure AI (Llama-3.3-70B) via Entra ID OAuth. Returns answers with numbers spelled out. Demonstrates cross-platform interoperability between Databricks MCP and Azure AI.'
-RETURN (
-    SELECT
-        CASE
-            WHEN get_json_object(result.text, '$.choices[0].message.content') IS NOT NULL
-            THEN concat('[AzureFoundry] ', get_json_object(result.text, '$.choices[0].message.content'))
-            WHEN get_json_object(result.text, '$.error.message') IS NOT NULL
-            THEN concat('[AzureFoundry] Error: ', get_json_object(result.text, '$.error.message'))
-            ELSE concat('[AzureFoundry] Unexpected response (', result.status_code, '): ', substring(result.text, 1, 500))
-        END
-    FROM (
-        SELECT http_request(
-            conn => '{FOUNDRY_CONNECTION_NAME}',
-            method => 'POST',
-            path => '/chat/completions?api-version=2024-05-01-preview',
-            headers => map('extra-parameters', 'pass-through'),
-            json => to_json(named_struct(
-                'messages', array(
-                    named_struct('role', 'system', 'content', 'You are a helpful assistant. Always spell out all numbers in your answers. For example, use "four" instead of "4", "forty-four and two tenths" instead of "44.2", "one hundred twenty-three" instead of "123". Never use numeric digits in your responses.'),
-                    named_struct('role', 'user', 'content', message)
-                ),
-                'max_tokens', 500,
-                'model', 'Llama-3.3-70B-Instruct'
-            ))
-        ) as result
-    )
-)
+LANGUAGE PYTHON
+COMMENT 'MCP Tool: Chat with a real Azure AI Foundry Agent. Demonstrates cross-platform agent-to-agent interoperability between Databricks and Azure AI Foundry.'
+AS $$
+import json
+import time
+import urllib.request
+import urllib.parse
+import urllib.error
+
+# Configuration (embedded at function creation time)
+TENANT_ID = "{TENANT_ID}"
+CLIENT_ID = "{foundry_client_id}"
+CLIENT_SECRET = "{foundry_client_secret}"
+PROJECT_ENDPOINT = "{FOUNDRY_PROJECT_ENDPOINT}"
+ASSISTANT_ID = "{FOUNDRY_AGENT_ID}"
+API_VERSION = "2025-05-15-preview"
+TIMEOUT = 60
+
+def get_token():
+    \"\"\"Get Azure AD token using client credentials.\"\"\"
+    url = f"https://login.microsoftonline.com/{{TENANT_ID}}/oauth2/v2.0/token"
+    data = urllib.parse.urlencode({{
+        "grant_type": "client_credentials",
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+        "scope": "https://ai.azure.com/.default"
+    }}).encode()
+    req = urllib.request.Request(url, data=data, method="POST")
+    with urllib.request.urlopen(req) as resp:
+        return json.loads(resp.read().decode())["access_token"]
+
+def api_call(method, path, token, body=None):
+    \"\"\"Make API call to Foundry. Threads/messages/runs are at project level.\"\"\"
+    url = f"{{PROJECT_ENDPOINT}}{{path}}?api-version={{API_VERSION}}"
+    headers = {{"Authorization": f"Bearer {{token}}", "Content-Type": "application/json"}}
+    data = json.dumps(body).encode() if body else None
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode() if e.fp else str(e)
+        return {{"error": error_body, "status": e.code}}
+
+def call_foundry_agent(user_message):
+    \"\"\"Call the Foundry agent and return the response.\"\"\"
+    try:
+        token = get_token()
+
+        # Create thread
+        thread = api_call("POST", "/threads", token, {{}})
+        if "error" in thread:
+            return f"[Foundry Agent] Error creating thread: {{thread['error']}}"
+        thread_id = thread.get("id")
+
+        # Add message
+        api_call("POST", f"/threads/{{thread_id}}/messages", token,
+                 {{"role": "user", "content": user_message}})
+
+        # Run agent
+        run = api_call("POST", f"/threads/{{thread_id}}/runs", token,
+                       {{"assistant_id": ASSISTANT_ID}})
+        if "error" in run:
+            return f"[Foundry Agent] Error starting run: {{run['error']}}"
+        run_id = run.get("id")
+
+        # Poll for completion
+        start = time.time()
+        while time.time() - start < TIMEOUT:
+            status = api_call("GET", f"/threads/{{thread_id}}/runs/{{run_id}}", token)
+            if status.get("status") == "completed":
+                break
+            elif status.get("status") in ["failed", "cancelled", "expired"]:
+                return f"[Foundry Agent] Run {{status.get('status')}}"
+            time.sleep(0.5)
+        else:
+            return "[Foundry Agent] Timeout waiting for response"
+
+        # Get response
+        messages = api_call("GET", f"/threads/{{thread_id}}/messages", token)
+        if "data" in messages and messages["data"]:
+            msg = messages["data"][0]
+            for content in msg.get("content", []):
+                if content.get("type") == "text":
+                    response_text = content.get("text", {{}}).get("value", "")
+                    return f"[Foundry Agent] {{response_text}}"
+
+        return "[Foundry Agent] No response content"
+
+    except Exception as e:
+        return f"[Foundry Agent] Error: {{str(e)}}"
+
+return call_foundry_agent(message)
+$$
 """)
-print("Registered: foundry_chat_agent")
+print("Registered: foundry_agent")
 
 # COMMAND ----------
 
@@ -426,7 +478,7 @@ except Exception as e:
 # Test 4: Azure AI Foundry chat agent via MCP
 print("=== Test 4: Foundry Chat Agent via MCP ===")
 try:
-    result = call_mcp_function("foundry_chat_agent", {"message": "What is 2 + 2? Answer briefly."})
+    result = call_mcp_function("foundry_agent", {"message": "What is 2 + 2? Answer briefly."})
     print(json.dumps(result, indent=2))
 except Exception as e:
     import traceback
@@ -449,8 +501,8 @@ MCP Endpoints:
   epic_patient_search:
   https://{workspace_url}/api/2.0/mcp/functions/{CATALOG}/{SCHEMA}/epic_patient_search
 
-  foundry_chat_agent:
-  https://{workspace_url}/api/2.0/mcp/functions/{CATALOG}/{SCHEMA}/foundry_chat_agent
+  foundry_agent:
+  https://{workspace_url}/api/2.0/mcp/functions/{CATALOG}/{SCHEMA}/foundry_agent
 
 Test with curl:
 
@@ -477,20 +529,18 @@ print(f"""
 
 2. UC Connection (metastore-level):
    GRANT USE CONNECTION ON CONNECTION `{CONNECTION_NAME}` TO `users`
-   GRANT USE CONNECTION ON CONNECTION `{FOUNDRY_CONNECTION_NAME}` TO `users`
 
 3. UC Function Execute:
    GRANT EXECUTE ON FUNCTION {CATALOG}.{SCHEMA}.calculator_agent TO `users`
    GRANT EXECUTE ON FUNCTION {CATALOG}.{SCHEMA}.epic_patient_search TO `users`
-   GRANT EXECUTE ON FUNCTION {CATALOG}.{SCHEMA}.foundry_chat_agent TO `users`
+   GRANT EXECUTE ON FUNCTION {CATALOG}.{SCHEMA}.foundry_agent TO `users`
 
 === Architecture ===
 - Databricks Service Principal for calculator-agent (OAuth M2M)
 - Azure AD Service Principal for Foundry (Entra ID OAuth M2M)
 - OAuth credentials stored in secret scope: {SECRET_SCOPE}
-- HTTP Connections use OAuth M2M with automatic token refresh
-- Calculator token endpoint: {TOKEN_ENDPOINT}
-- Foundry token endpoint: {AZURE_TOKEN_ENDPOINT}
+- Calculator: UC HTTP Connection with OAuth M2M (token endpoint: {TOKEN_ENDPOINT})
+- Foundry: Python UC Function with embedded SP credentials (Azure AD token)
 """)
 
 # COMMAND ----------
