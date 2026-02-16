@@ -22,6 +22,42 @@ databricks --version
 
 ---
 
+## Quickstart
+
+Get up and running in 5 commands:
+
+```bash
+# 1. Create configuration file
+make setup
+# Edit .env with your Azure tenant/subscription IDs
+
+# 2. Deploy Azure infrastructure (Databricks + AI Foundry)
+make deploy-infra
+
+# 3. Assign metastore to workspace (manual step)
+#    Go to https://accounts.azuredatabricks.net → Data → Metastores
+#    Select your metastore → Assign to workspace
+
+# 4. Deploy gpt-4o model + Foundry agent
+make deploy-foundry-agent
+
+# 5. Deploy Unity Catalog + Databricks Apps + notebook
+make deploy-uc
+```
+
+After `make deploy-uc` completes, open the notebook URL printed in the output and run all cells to register UC Functions as MCP tools.
+
+**Test it works:**
+
+```sql
+-- In Databricks SQL
+SELECT mcp_agents.tools.calculator_agent('add 5 and 3');
+SELECT mcp_agents.tools.foundry_agent('Hello from Databricks!');
+SELECT mcp_agents.tools.epic_patient_search('Argonaut', 'Jason', NULL);
+```
+
+---
+
 ## Three Pillars
 
 | Pillar | What It Means |
@@ -647,7 +683,8 @@ For detailed setup, see the [Agent Bricks documentation](https://docs.databricks
 │   └── mcp/
 │       └── functions/            # UC Function definitions
 ├── notebooks/
-│   └── register_uc_functions.py  # Register UC Functions (wrappers for agents)
+│   ├── register_uc_functions.py  # Register UC Functions (wrappers for agents)
+│   └── foundry_traces_to_mlflow.py  # Import App Insights telemetry from Azure AI Foundry into MLflow traces (manual setup, not automated)
 ├── infra/
 │   ├── main.tf                   # Azure Databricks + AI Foundry
 │   └── Makefile
@@ -695,8 +732,7 @@ The notebook (`register_uc_functions.py`) handles steps 4-5 automatically after 
 | Limitation | Description | Status |
 |------------|-------------|--------|
 | **OAuth token generation in notebooks** | Notebooks cannot programmatically generate OAuth secrets for Service Principals. Secrets must be created via Terraform/CLI. | Tracked internally |
-| **HTTP Connections block U2M** | UC HTTP Connections using `http_request()` in SQL do not support User-to-Machine (U2M) authentication. Use OAuth M2M (Service Principal) instead, or lean on the Python WorkspaceClient() HTTP_Request equivalent. | Platform limitation |
-| **SP permission via CLI** | Granting app permissions to SPs requires using the application_id as `service_principal_name` in API calls. | Workaround documented |
+| **HTTP Connections block U2M** | UC HTTP Connections using `http_request()` in SQL do not support User-to-Machine (U2M) authentication, per user. You must use the Python WorkspaceClient() HTTP_Request equivalent. | Platform restriction |
 
 ---
 
