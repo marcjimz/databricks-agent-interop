@@ -175,6 +175,46 @@ print(f"Created connection with OAuth M2M: {CONNECTION_NAME}")
 
 # COMMAND ----------
 
+# Setup Foundry Agent HTTP Connection (Azure AD OAuth)
+FOUNDRY_CONNECTION_NAME = "foundry_agent_http"
+
+# Extract host and project path from project endpoint
+foundry_match = re.match(r'(https://[^/]+)', FOUNDRY_PROJECT_ENDPOINT)
+if not foundry_match:
+    raise ValueError(f"Invalid FOUNDRY_PROJECT_ENDPOINT: {FOUNDRY_PROJECT_ENDPOINT}")
+FOUNDRY_HOST = foundry_match.group(1)
+FOUNDRY_PROJECT_PATH = FOUNDRY_PROJECT_ENDPOINT.replace(FOUNDRY_HOST, '')
+
+# Azure AD token endpoint for service principal
+TOKEN_ENDPOINT_AAD = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
+
+# Get Foundry SP credentials from secret scope
+foundry_client_id = dbutils.secrets.get(scope=SECRET_SCOPE, key="foundry-client-id")
+foundry_client_secret = dbutils.secrets.get(scope=SECRET_SCOPE, key="foundry-client-secret")
+
+print(f"Foundry Host: {FOUNDRY_HOST}")
+print(f"Foundry Project Path: {FOUNDRY_PROJECT_PATH}")
+print(f"Azure AD Token Endpoint: {TOKEN_ENDPOINT_AAD}")
+print(f"Connection: {FOUNDRY_CONNECTION_NAME}")
+
+# COMMAND ----------
+
+spark.sql(f"DROP CONNECTION IF EXISTS {FOUNDRY_CONNECTION_NAME}")
+spark.sql(f"""
+    CREATE CONNECTION {FOUNDRY_CONNECTION_NAME}
+    TYPE HTTP
+    OPTIONS (
+        host '{FOUNDRY_HOST}',
+        client_id '{foundry_client_id}',
+        client_secret '{foundry_client_secret}',
+        oauth_scope 'https://ai.azure.com/.default',
+        token_endpoint '{TOKEN_ENDPOINT_AAD}'
+    )
+""")
+print(f"Created connection with Azure AD OAuth: {FOUNDRY_CONNECTION_NAME}")
+
+# COMMAND ----------
+
 # MAGIC %md
 # MAGIC ## Register Calculator Agent Function
 
@@ -255,133 +295,193 @@ print("Registered: epic_patient_search")
 # MAGIC %md
 # MAGIC ## Register Azure AI Foundry Agent
 # MAGIC
-# MAGIC This function calls a **real Azure AI Foundry Agent** (not just a model endpoint),
+# MAGIC This function calls a **real Azure AI Foundry Agent** via the Agents API,
 # MAGIC demonstrating true cross-platform agent-to-agent interoperability via MCP.
 # MAGIC
-# MAGIC The Python UC Function handles the full Agents API flow:
-# MAGIC 1. Authenticate with Azure AD (Service Principal)
-# MAGIC 2. Create a thread
-# MAGIC 3. Add the user message
-# MAGIC 4. Run the agent
-# MAGIC 5. Poll for completion
-# MAGIC 6. Return the agent's response
+# MAGIC **Architecture:**
+# MAGIC - Uses UC HTTP Connection (`foundry_agent_http`) with Azure AD OAuth — no embedded credentials
+# MAGIC - Single `http_request()` call with `stream=true` using `create_thread_and_run`
+# MAGIC - SSE response is parsed to extract the agent's reply — no polling needed
+# MAGIC - Pure SQL function (no Python UDF)
 
 # COMMAND ----------
 
-# Get Foundry SP credentials for Python UC Function
-# These are stored in the secret scope and embedded in the function.
-foundry_client_id = dbutils.secrets.get(scope=SECRET_SCOPE, key="foundry-client-id")
-foundry_client_secret = dbutils.secrets.get(scope=SECRET_SCOPE, key="foundry-client-secret")
-print(f"Retrieved Foundry OAuth credentials from secret scope")
-print(f"Foundry Project Endpoint: {FOUNDRY_PROJECT_ENDPOINT}")
-print(f"Foundry Agent ID: {FOUNDRY_AGENT_ID}")
+FOUNDRY_API_VERSION = "2025-05-15-preview"
 
-# COMMAND ----------
-
-# Register Foundry Agent function (Python)
-# Calls a real Azure AI Foundry Agent using the Agents API.
-# Authenticates with Azure AD Service Principal and handles the full thread/run lifecycle.
 spark.sql(f"""
 CREATE OR REPLACE FUNCTION {CATALOG}.{SCHEMA}.foundry_agent(
     message STRING COMMENT 'Message to send to the Azure AI Foundry Agent'
 )
 RETURNS STRING
-LANGUAGE PYTHON
 COMMENT 'MCP Tool: Chat with a real Azure AI Foundry Agent. Demonstrates cross-platform agent-to-agent interoperability between Databricks and Azure AI Foundry.'
-AS $$
-import json
-import time
-import urllib.request
-import urllib.parse
-import urllib.error
-
-# Configuration (embedded at function creation time)
-TENANT_ID = "{TENANT_ID}"
-CLIENT_ID = "{foundry_client_id}"
-CLIENT_SECRET = "{foundry_client_secret}"
-PROJECT_ENDPOINT = "{FOUNDRY_PROJECT_ENDPOINT}"
-ASSISTANT_ID = "{FOUNDRY_AGENT_ID}"
-API_VERSION = "2025-05-15-preview"
-TIMEOUT = 60
-
-def get_token():
-    \"\"\"Get Azure AD token using client credentials.\"\"\"
-    url = f"https://login.microsoftonline.com/{{TENANT_ID}}/oauth2/v2.0/token"
-    data = urllib.parse.urlencode({{
-        "grant_type": "client_credentials",
-        "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
-        "scope": "https://ai.azure.com/.default"
-    }}).encode()
-    req = urllib.request.Request(url, data=data, method="POST")
-    with urllib.request.urlopen(req) as resp:
-        return json.loads(resp.read().decode())["access_token"]
-
-def api_call(method, path, token, body=None):
-    \"\"\"Make API call to Foundry. Threads/messages/runs are at project level.\"\"\"
-    url = f"{{PROJECT_ENDPOINT}}{{path}}?api-version={{API_VERSION}}"
-    headers = {{"Authorization": f"Bearer {{token}}", "Content-Type": "application/json"}}
-    data = json.dumps(body).encode() if body else None
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read().decode())
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode() if e.fp else str(e)
-        return {{"error": error_body, "status": e.code}}
-
-def call_foundry_agent(user_message):
-    \"\"\"Call the Foundry agent and return the response.\"\"\"
-    try:
-        token = get_token()
-
-        # Create thread
-        thread = api_call("POST", "/threads", token, {{}})
-        if "error" in thread:
-            return f"[Foundry Agent] Error creating thread: {{thread['error']}}"
-        thread_id = thread.get("id")
-
-        # Add message
-        api_call("POST", f"/threads/{{thread_id}}/messages", token,
-                 {{"role": "user", "content": user_message}})
-
-        # Run agent
-        run = api_call("POST", f"/threads/{{thread_id}}/runs", token,
-                       {{"assistant_id": ASSISTANT_ID}})
-        if "error" in run:
-            return f"[Foundry Agent] Error starting run: {{run['error']}}"
-        run_id = run.get("id")
-
-        # Poll for completion
-        start = time.time()
-        while time.time() - start < TIMEOUT:
-            status = api_call("GET", f"/threads/{{thread_id}}/runs/{{run_id}}", token)
-            if status.get("status") == "completed":
-                break
-            elif status.get("status") in ["failed", "cancelled", "expired"]:
-                return f"[Foundry Agent] Run {{status.get('status')}}"
-            time.sleep(0.5)
-        else:
-            return "[Foundry Agent] Timeout waiting for response"
-
-        # Get response
-        messages = api_call("GET", f"/threads/{{thread_id}}/messages", token)
-        if "data" in messages and messages["data"]:
-            msg = messages["data"][0]
-            for content in msg.get("content", []):
-                if content.get("type") == "text":
-                    response_text = content.get("text", {{}}).get("value", "")
-                    return f"[Foundry Agent] {{response_text}}"
-
-        return "[Foundry Agent] No response content"
-
-    except Exception as e:
-        return f"[Foundry Agent] Error: {{str(e)}}"
-
-return call_foundry_agent(message)
-$$
+RETURN (
+    SELECT
+        CASE
+            WHEN result.status_code = 200 THEN
+                concat('[Foundry Agent] ',
+                    coalesce(
+                        get_json_object(
+                            regexp_extract(
+                                result.text,
+                                'event: thread\\.message\\.completed\\r?\\ndata: ([^\\r\\n]+)',
+                                1
+                            ),
+                            '$.content[0].text.value'
+                        ),
+                        'No response content'
+                    )
+                )
+            ELSE concat('[Foundry Agent] Error (HTTP ', result.status_code, '): ', left(result.text, 500))
+        END
+    FROM (
+        SELECT http_request(
+            conn => '{FOUNDRY_CONNECTION_NAME}',
+            method => 'POST',
+            path => '{FOUNDRY_PROJECT_PATH}/threads/runs?api-version={FOUNDRY_API_VERSION}',
+            json => to_json(named_struct(
+                'assistant_id', '{FOUNDRY_AGENT_ID}',
+                'thread', named_struct(
+                    'messages', array(named_struct('role', 'user', 'content', message))
+                ),
+                'stream', TRUE
+            ))
+        ) as result
+    )
+)
 """)
 print("Registered: foundry_agent")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Register PHI Detection Guardrail
+# MAGIC
+# MAGIC HIPAA Safe Harbor PHI detection using Microsoft Presidio.
+# MAGIC Uses `ENVIRONMENT` clause to bundle dependencies (presidio-analyzer, spaCy).
+
+# COMMAND ----------
+
+spark.sql(f"""
+CREATE OR REPLACE FUNCTION {CATALOG}.{SCHEMA}.detect_phi(
+    text STRING COMMENT 'Text to scan for Protected Health Information (PHI)'
+)
+RETURNS STRING
+LANGUAGE PYTHON
+COMMENT 'HIPAA Safe Harbor PHI detection guardrail. Scans text for all 18 HIPAA identifier types using regex pattern matching. Returns JSON with pass/fail status and detailed findings.'
+AS $$
+import json
+import re
+
+# HIPAA Safe Harbor: 18 identifier types
+# Each entry: (hipaa_number, hipaa_name, entity_type, pattern, score)
+# Patterns are checked in order; first match wins per span.
+
+RULES = [
+    # 7 - SSN
+    ("7", "Social Security numbers", "US_SSN",
+     r"\\b\\d{{3}}-\\d{{2}}-\\d{{4}}\\b", 0.95),
+
+    # 6 - Email
+    ("6", "Email addresses", "EMAIL_ADDRESS",
+     r"\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{{2,}}\\b", 0.95),
+
+    # 14 - URL
+    ("14", "Web URLs", "URL",
+     r"https?://[^\\s,]+", 0.9),
+
+    # 15 - IP address
+    ("15", "IP addresses", "IP_ADDRESS",
+     r"\\b(?:(?:25[0-5]|2[0-4]\\d|[01]?\\d\\d?)\\.)"
+     r"{{3}}(?:25[0-5]|2[0-4]\\d|[01]?\\d\\d?)\\b", 0.95),
+
+    # 4/5 - Phone / Fax
+    ("4/5", "Phone/Fax numbers", "PHONE_NUMBER",
+     r"(?<!\\d)(?:\\+?1[-.\\s]?)?\\(?\\d{{3}}\\)?[-.\\s]?\\d{{3}}[-.\\s]?\\d{{4}}(?!\\d)", 0.9),
+
+    # 10 - Credit card (major brands: 13-19 digits)
+    ("10", "Account numbers", "CREDIT_CARD",
+     r"\\b(?:4\\d{{12}}(?:\\d{{3}})?|5[1-5]\\d{{14}}|3[47]\\d{{13}}|6(?:011|5\\d{{2}})\\d{{12}})\\b", 0.9),
+
+    # 8 - MRN (with prefix/context)
+    ("8", "Medical record numbers", "MEDICAL_RECORD_NUMBER",
+     r"\\bMRN[-:\\s#]*\\d{{5,10}}\\b", 0.95),
+
+    # 9 - Health plan ID (INS/HP/GRP prefix)
+    ("9", "Health plan beneficiary numbers", "HEALTH_PLAN_ID",
+     r"\\b(?:INS|HP|GRP)[-#]?\\d{{6,12}}\\b", 0.9),
+
+    # 11 - US Passport
+    ("11", "Certificate/license numbers", "US_PASSPORT",
+     r"\\b[A-Z]\\d{{8}}\\b", 0.5),
+
+    # 12 - VIN (17 chars, no I/O/Q)
+    ("12", "Vehicle identifiers", "VEHICLE_ID",
+     r"\\b[A-HJ-NPR-Z0-9]{{17}}\\b", 0.85),
+
+    # 13 - Device serial (SN/Serial prefix)
+    ("13", "Device identifiers", "DEVICE_ID",
+     r"\\b(?:SN|S/N|Serial)[-:\\s#]*[A-Z0-9]{{8,20}}\\b", 0.85),
+
+    # 3 - Dates (various formats, context-enhanced for DOB)
+    ("3", "Dates", "DATE_TIME",
+     r"\\b(?:\\d{{1,2}}/\\d{{1,2}}/\\d{{2,4}}|\\d{{4}}-\\d{{2}}-\\d{{2}}|"
+     r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*"
+     r"\\s+\\d{{1,2}},?\\s+\\d{{4}})\\b", 0.7),
+
+    # 2 - ZIP code (5 or 5+4, with address context)
+    ("2", "Geographic data", "ZIP_CODE",
+     r"\\b\\d{{5}}(?:-\\d{{4}})?\\b", 0.4),
+
+    # 1 - Names (title/context + capitalized words)
+    ("1", "Names", "PERSON",
+     r"(?:(?:Patient|Mr\\.?|Mrs\\.?|Ms\\.?|Dr\\.?|Prof\\.?)\\s+)"
+     r"(?:[A-Z][a-z]+(?:\\s+[A-Z][a-z]+){{1,3}})", 0.85),
+
+    # 1 - Names (labeled: "Name:" context)
+    ("1", "Names", "PERSON",
+     r"(?:(?:[Nn]ame|[Pp]atient)\\s*:\\s*)"
+     r"(?:[A-Z][a-z]+(?:\\s+[A-Z][a-z]+){{1,3}})", 0.8),
+
+    # 16 - Biometric identifiers (keywords)
+    ("16", "Biometric identifiers", "BIOMETRIC_ID",
+     r"\\b(?:fingerprints?|retinal?\\s+scan|iris\\s+scan|voiceprint|"
+     r"voice\\s+print|faceprint|face\\s+geometry|palm\\s+print|"
+     r"hand\\s+geometry|dna\\s+(?:sample|profile)|genetic\\s+marker)\\b", 0.9),
+
+    # 18 - Other unique IDs (generic alphanumeric with prefix)
+    ("18", "Other unique identifying numbers", "OTHER_UNIQUE_ID",
+     r"\\b[A-Z]{{2,4}}[-#]\\d{{6,12}}\\b", 0.4),
+]
+
+findings = []
+matched_spans = set()
+
+for hipaa_num, hipaa_name, entity_type, pattern, score in RULES:
+    for m in re.finditer(pattern, text, re.IGNORECASE if entity_type == "BIOMETRIC_ID" else 0):
+        start, end = m.start(), m.end()
+        # Skip if this span overlaps with a higher-priority match
+        span_key = (start, end)
+        if span_key in matched_spans:
+            continue
+        matched_spans.add(span_key)
+        findings.append({{
+            "hipaa_identifier": f"#{{hipaa_num}} {{hipaa_name}}",
+            "entity_type": entity_type,
+            "text": m.group(),
+            "score": score,
+        }})
+
+if not findings:
+    return json.dumps({{"status": "pass", "message": "No PHI detected"}})
+
+return json.dumps({{
+    "status": "fail",
+    "message": "PHI detected",
+    "findings": sorted(findings, key=lambda x: text.index(x["text"])),
+}})
+$$
+""")
+print("Registered: detect_phi")
 
 # COMMAND ----------
 
@@ -487,6 +587,46 @@ except Exception as e:
 
 # COMMAND ----------
 
+# Test 5a: PHI guardrail — clean text passes
+print("=== Test 5a: PHI Guardrail — Clean Text ===")
+try:
+    clean_text = "What are the recommended screening intervals for colorectal cancer in average-risk adults over 45?"
+    phi_result = spark.sql(f"SELECT {CATALOG}.{SCHEMA}.detect_phi('{clean_text}')").collect()[0][0]
+    phi = json.loads(phi_result)
+    print(f"PHI check: {phi['status']}")
+    if phi["status"] == "pass":
+        print("No PHI detected — forwarding to Foundry agent...")
+        agent_result = spark.sql(f"SELECT {CATALOG}.{SCHEMA}.foundry_agent('{clean_text}')").collect()[0][0]
+        print(f"Agent response: {agent_result}")
+    else:
+        print("BLOCKED: PHI detected — not forwarding to agent")
+        for f in phi.get("findings", []):
+            print(f"  {f['hipaa_identifier']}: {f['entity_type']} = '{f['text']}' (score: {f['score']})")
+except Exception as e:
+    print(f"Error: {e}")
+
+# COMMAND ----------
+
+# Test 5b: PHI guardrail — PHI detected and blocked
+print("=== Test 5b: PHI Guardrail — PHI Detected ===")
+try:
+    phi_text = "Patient John Smith, DOB 03/15/1980, SSN 123-45-6789, lives at 456 Oak Ave, Springfield IL 62704. MRN#7894561, email jsmith@email.com, phone (555) 867-5309. Insurance ID: INS#987654321. IP: 192.168.1.100"
+    phi_result = spark.sql(f"SELECT {CATALOG}.{SCHEMA}.detect_phi('{phi_text}')").collect()[0][0]
+    phi = json.loads(phi_result)
+    print(f"PHI check: {phi['status']}")
+    if phi["status"] == "pass":
+        print("No PHI detected — forwarding to Foundry agent...")
+        agent_result = spark.sql(f"SELECT {CATALOG}.{SCHEMA}.foundry_agent('{phi_text}')").collect()[0][0]
+        print(f"Agent response: {agent_result}")
+    else:
+        print("BLOCKED: PHI detected — not forwarding to agent")
+        for f in phi.get("findings", []):
+            print(f"  {f['hipaa_identifier']}: {f['entity_type']} = '{f['text']}' (score: {f['score']})")
+except Exception as e:
+    print(f"Error: {e}")
+
+# COMMAND ----------
+
 # MAGIC %md
 # MAGIC ## MCP Endpoints
 
@@ -503,6 +643,9 @@ MCP Endpoints:
 
   foundry_agent:
   https://{workspace_url}/api/2.0/mcp/functions/{CATALOG}/{SCHEMA}/foundry_agent
+
+  detect_phi:
+  https://{workspace_url}/api/2.0/mcp/functions/{CATALOG}/{SCHEMA}/detect_phi
 
 Test with curl:
 
@@ -534,13 +677,15 @@ print(f"""
    GRANT EXECUTE ON FUNCTION {CATALOG}.{SCHEMA}.calculator_agent TO `users`
    GRANT EXECUTE ON FUNCTION {CATALOG}.{SCHEMA}.epic_patient_search TO `users`
    GRANT EXECUTE ON FUNCTION {CATALOG}.{SCHEMA}.foundry_agent TO `users`
+   GRANT EXECUTE ON FUNCTION {CATALOG}.{SCHEMA}.detect_phi TO `users`
 
 === Architecture ===
 - Databricks Service Principal for calculator-agent (OAuth M2M)
 - Azure AD Service Principal for Foundry (Entra ID OAuth M2M)
 - OAuth credentials stored in secret scope: {SECRET_SCOPE}
-- Calculator: UC HTTP Connection with OAuth M2M (token endpoint: {TOKEN_ENDPOINT})
-- Foundry: Python UC Function with embedded SP credentials (Azure AD token)
+- Calculator: UC HTTP Connection ({CONNECTION_NAME}) with Databricks OAuth M2M
+- Foundry: UC HTTP Connection ({FOUNDRY_CONNECTION_NAME}) with Azure AD OAuth M2M
+- No embedded credentials — all auth via managed UC HTTP Connections
 """)
 
 # COMMAND ----------

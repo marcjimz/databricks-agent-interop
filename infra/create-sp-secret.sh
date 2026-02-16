@@ -79,6 +79,24 @@ if [ -z "$TOKEN" ]; then
 fi
 echo "Got access token"
 
+# Delete existing OAuth secrets to make room (max 5 per SP)
+echo "Checking existing OAuth secrets for service principal..."
+EXISTING_SECRETS=$(curl -s -X GET \
+    "${DATABRICKS_HOST}/api/2.0/accounts/servicePrincipals/${SP_ID}/credentials/secrets" \
+    -H "Authorization: Bearer $TOKEN")
+
+SECRET_COUNT=$(echo "$EXISTING_SECRETS" | jq '.secrets // [] | length')
+if [ "$SECRET_COUNT" -ge 4 ]; then
+    echo "SP has $SECRET_COUNT OAuth secrets (max 5). Deleting old secrets..."
+    echo "$EXISTING_SECRETS" | jq -r '.secrets[].id' | while read -r SECRET_ID; do
+        echo "  Deleting secret: $SECRET_ID"
+        curl -s -X DELETE \
+            "${DATABRICKS_HOST}/api/2.0/accounts/servicePrincipals/${SP_ID}/credentials/secrets/${SECRET_ID}" \
+            -H "Authorization: Bearer $TOKEN" > /dev/null
+    done
+    echo "Cleaned up old secrets"
+fi
+
 # Create OAuth secret via API
 echo "Creating OAuth secret for service principal..."
 SECRET_RESPONSE=$(curl -s -X POST \
