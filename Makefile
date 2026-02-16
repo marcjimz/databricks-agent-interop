@@ -1,7 +1,7 @@
 # Databricks Agent Interoperability Framework
 # MCP + Unity Catalog
 
-.PHONY: help setup check-deps check-env deploy-infra deploy-uc destroy-infra deploy-bundle deploy-apps deploy-app-code start-apps wait-for-deployment update-agent-env grant-sp-permission create-sp-secret deploy-foundry-agent delete-foundry-agent deploy-mcp-agent delete-mcp-agent test-mcp-local install unit-test lint format clean clean-bundle-state outputs sync-tf-state
+.PHONY: help setup check-deps check-env deploy-infra deploy-uc destroy-infra deploy-bundle deploy-apps deploy-app-code start-apps wait-for-deployment update-agent-env grant-sp-permission create-sp-secret deploy-foundry-agent delete-foundry-agent setup-foundry-oauth check-foundry-oauth deploy-mcp-agent delete-mcp-agent test-mcp-local install unit-test lint format clean clean-bundle-state outputs sync-tf-state
 
 # Load environment variables from .env
 ifneq (,$(wildcard .env))
@@ -33,6 +33,8 @@ help:
 	@echo "  make destroy-infra        Destroy all Azure resources"
 	@echo ""
 	@echo "=== Foundry Agents ==="
+	@echo "  make setup-foundry-oauth  Setup OAuth connection from Foundry to Databricks MCP"
+	@echo "  make check-foundry-oauth  Check Foundry OAuth connection status"
 	@echo "  make deploy-mcp-agent     Deploy MCP-enabled agent to Foundry portal"
 	@echo "  make delete-mcp-agent     Delete MCP-enabled agent from Foundry portal"
 	@echo "  make test-mcp-local       Test MCP connection locally"
@@ -126,10 +128,12 @@ deploy-uc: check-env check-databricks sync-tf-state
 		-var="location=$(LOCATION)" \
 		-var="prefix=$(PREFIX)" \
 		-var="resource_group_name=$(RESOURCE_GROUP)" \
+		-var="uc_catalog=$(UC_CATALOG)" \
+		-var="uc_schema=$(UC_SCHEMA)" \
 		-var="deploy_uc=true"
 	@echo ""
 	@echo "=== Creating OAuth Secret for Service Principal ==="
-	@cd infra && ./create-sp-secret.sh || echo "Note: SP secret creation may require manual step. See docs."
+	@cd infra && ./create-sp-secret.sh
 	@echo ""
 	@$(MAKE) deploy-bundle
 	@$(MAKE) grant-sp-permission
@@ -193,6 +197,24 @@ update-env-from-terraform:
 			echo "AZURE_AI_PROJECT_ENDPOINT=$$PROJECT_URL" >> .env; \
 		fi; \
 		echo "Set AZURE_AI_PROJECT_ENDPOINT=$$PROJECT_URL"; \
+	fi
+	@APPI_CONN=$$(cd infra && terraform output -raw application_insights_connection_string 2>/dev/null) && \
+	if [ -n "$$APPI_CONN" ]; then \
+		if grep -q "^APPLICATIONINSIGHTS_CONNECTION_STRING=" .env 2>/dev/null; then \
+			sed -i.bak "s|^APPLICATIONINSIGHTS_CONNECTION_STRING=.*|APPLICATIONINSIGHTS_CONNECTION_STRING=$$APPI_CONN|" .env && rm -f .env.bak; \
+		else \
+			echo "APPLICATIONINSIGHTS_CONNECTION_STRING=$$APPI_CONN" >> .env; \
+		fi; \
+		echo "Set APPLICATIONINSIGHTS_CONNECTION_STRING"; \
+	fi
+	@APPI_APP_ID=$$(cd infra && terraform output -raw application_insights_app_id 2>/dev/null) && \
+	if [ -n "$$APPI_APP_ID" ]; then \
+		if grep -q "^APPLICATION_INSIGHTS_APP_ID=" .env 2>/dev/null; then \
+			sed -i.bak "s|^APPLICATION_INSIGHTS_APP_ID=.*|APPLICATION_INSIGHTS_APP_ID=$$APPI_APP_ID|" .env && rm -f .env.bak; \
+		else \
+			echo "APPLICATION_INSIGHTS_APP_ID=$$APPI_APP_ID" >> .env; \
+		fi; \
+		echo "Set APPLICATION_INSIGHTS_APP_ID=$$APPI_APP_ID"; \
 	fi
 
 # =============================================================================
@@ -301,6 +323,11 @@ update-agent-env: check-databricks
 		echo "AZURE_AI_PROJECT_ENDPOINT=$(AZURE_AI_PROJECT_ENDPOINT)" >> notebooks/.env && \
 		echo "FOUNDRY_AGENT_ID=$(FOUNDRY_AGENT_ID)" >> notebooks/.env && \
 		echo "TENANT_ID=$(TENANT_ID)" >> notebooks/.env && \
+		echo "" >> notebooks/.env && \
+		echo "# Azure Infrastructure (used by trace ingestion notebook)" >> notebooks/.env && \
+		echo "SUBSCRIPTION_ID=$(SUBSCRIPTION_ID)" >> notebooks/.env && \
+		echo "PREFIX=$(PREFIX)" >> notebooks/.env && \
+		echo "RESOURCE_GROUP=$(RESOURCE_GROUP)" >> notebooks/.env && \
 		echo "Updated notebooks/.env"; \
 	else \
 		echo "Warning: URL not available yet."; \
@@ -418,6 +445,14 @@ deploy-mcp-agent: check-env
 delete-mcp-agent: check-env
 	@echo "=== Deleting MCP-enabled Agent from Foundry Portal ==="
 	python foundry/create_agent.py --delete
+
+setup-foundry-oauth: check-env
+	@echo "=== Setting up OAuth Connection from Foundry to Databricks MCP ==="
+	python foundry/setup_oauth_connection.py --create
+
+check-foundry-oauth: check-env
+	@echo "=== Checking Foundry OAuth Connection Status ==="
+	python foundry/setup_oauth_connection.py --status
 
 # =============================================================================
 # Development

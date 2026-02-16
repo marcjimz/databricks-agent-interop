@@ -46,37 +46,38 @@ SP_APP_ID=$(echo "$SP_JSON" | jq -r '.applicationId')
 
 echo "Found SP: id=$SP_ID, application_id=$SP_APP_ID"
 
-# Check if secret scope exists
+# Create secret scope if it doesn't exist
 echo "Checking secret scope: $SECRET_SCOPE"
 if ! databricks secrets list-scopes --output json 2>/dev/null | jq -e ".[] | select(.name == \"$SECRET_SCOPE\")" > /dev/null; then
-    echo "Error: Secret scope '$SECRET_SCOPE' not found. Run 'make deploy-uc' first."
-    exit 1
+    echo "Creating secret scope: $SECRET_SCOPE"
+    databricks secrets create-scope "$SECRET_SCOPE"
 fi
 
-# Check if secret already exists
+# Check if secrets already exist
 EXISTING_SECRET=$(databricks secrets list --scope "$SECRET_SCOPE" --output json 2>/dev/null | jq -r ".[] | select(.key == \"$SECRET_KEY\") | .key" || echo "")
+EXISTING_CLIENT_ID=$(databricks secrets list --scope "$SECRET_SCOPE" --output json 2>/dev/null | jq -r ".[] | select(.key == \"client-id\") | .key" || echo "")
 
-if [ -n "$EXISTING_SECRET" ]; then
-    echo "Secret '$SECRET_KEY' already exists in scope '$SECRET_SCOPE'"
-    read -p "Do you want to regenerate it? (y/N) " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo "Keeping existing secret."
-        exit 0
-    fi
+if [ -n "$EXISTING_SECRET" ] && [ -n "$EXISTING_CLIENT_ID" ]; then
+    echo "Secrets already exist in scope '$SECRET_SCOPE'. Skipping."
+    echo "To regenerate, delete the scope first: databricks secrets delete-scope $SECRET_SCOPE"
+    exit 0
 fi
 
 # Get access token - try databricks CLI first, fall back to Azure CLI
 echo "Getting access token..."
-TOKEN=$(databricks auth token --host "$DATABRICKS_HOST" 2>/dev/null | jq -r '.access_token')
-if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+TOKEN=""
+if TOKEN_JSON=$(databricks auth token --host "$DATABRICKS_HOST" 2>/dev/null); then
+    TOKEN=$(echo "$TOKEN_JSON" | jq -r '.access_token // empty')
+fi
+if [ -z "$TOKEN" ]; then
     echo "Databricks CLI token failed, trying Azure CLI..."
-    TOKEN=$(az account get-access-token --resource 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d --query accessToken -o tsv 2>/dev/null)
+    TOKEN=$(az account get-access-token --resource 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d --query accessToken -o tsv 2>/dev/null) || true
 fi
 if [ -z "$TOKEN" ]; then
     echo "Error: Could not get access token. Try 'az login' or 'databricks auth login --host $DATABRICKS_HOST'"
     exit 1
 fi
+echo "Got access token"
 
 # Create OAuth secret via API
 echo "Creating OAuth secret for service principal..."
@@ -103,14 +104,16 @@ fi
 
 echo "OAuth secret created successfully"
 
-# Store in Databricks secret scope
-echo "Storing secret in scope: $SECRET_SCOPE"
+# Store both client-id and client-secret in Databricks secret scope
+echo "Storing credentials in scope: $SECRET_SCOPE"
+databricks secrets put-secret "$SECRET_SCOPE" "client-id" --string-value "$SP_APP_ID"
 databricks secrets put-secret "$SECRET_SCOPE" "$SECRET_KEY" --string-value "$CLIENT_SECRET"
 
 echo ""
 echo "=== OAuth Secret Configuration Complete ==="
-echo "Client ID (application_id): $SP_APP_ID"
-echo "Secret stored in: $SECRET_SCOPE/$SECRET_KEY"
+echo "Stored in $SECRET_SCOPE:"
+echo "  - client-id: $SP_APP_ID"
+echo "  - client-secret: (hidden)"
 echo ""
 echo "Next steps:"
 echo "  1. Grant SP permission on app: databricks apps set-permission calculator-agent --permission CAN_USE --service-principal-name $SP_NAME"

@@ -93,12 +93,33 @@ variable "deploy_uc" {
   default     = false
 }
 
+variable "uc_catalog" {
+  description = "Unity Catalog catalog name for MCP tools"
+  default     = "mcp_agents"
+}
+
+variable "uc_schema" {
+  description = "Unity Catalog schema name for MCP tools"
+  default     = "tools"
+}
+
 # =============================================================================
 # Locals
 # =============================================================================
 
 locals {
   resource_group_name = var.resource_group_name != "" ? var.resource_group_name : "rg-${var.prefix}"
+
+  # Required tags for all resources
+  # RemoveAfter: 30 days from now in YYYY-MM-DD format
+  remove_after_date = formatdate("YYYY-MM-DD", timeadd(timestamp(), "720h"))
+
+  common_tags = {
+    RemoveAfter = local.remove_after_date
+    Owner       = "marcin.jimenez@databricks.com"
+    purpose     = "mcp-agent-interoperability"
+    managed_by  = "terraform"
+  }
 }
 
 # =============================================================================
@@ -115,14 +136,10 @@ resource "azurerm_resource_group" "main" {
   name     = local.resource_group_name
   location = var.location
 
-  tags = {
-    purpose    = "mcp-agent-interoperability"
-    managed_by = "terraform"
-  }
+  tags = local.common_tags
 
-  # Ignore changes to tags added outside Terraform
   lifecycle {
-    ignore_changes = [tags]
+    ignore_changes = [tags["RemoveAfter"]]
   }
 }
 
@@ -137,8 +154,10 @@ resource "azurerm_databricks_workspace" "main" {
   sku                         = "premium" # Required for Unity Catalog
   managed_resource_group_name = "rg-${var.prefix}-dbx-managed"
 
-  tags = {
-    purpose = "mcp-agent-interoperability"
+  tags = local.common_tags
+
+  lifecycle {
+    ignore_changes = [tags["RemoveAfter"]]
   }
 }
 
@@ -158,8 +177,10 @@ resource "azurerm_ai_services" "main" {
     type = "SystemAssigned"
   }
 
-  tags = {
-    purpose = "mcp-agent-interoperability"
+  tags = local.common_tags
+
+  lifecycle {
+    ignore_changes = [tags["RemoveAfter"]]
   }
 }
 
@@ -191,11 +212,98 @@ resource "azapi_resource" "foundry_project" {
     properties = {}
   }
 
-  tags = {
-    purpose = "mcp-agent-interoperability"
+  tags = local.common_tags
+
+  depends_on = [azapi_update_resource.ai_services_project_management, azurerm_application_insights.main]
+
+  lifecycle {
+    ignore_changes = [tags["RemoveAfter"]]
+  }
+}
+
+# =============================================================================
+# Application Insights for Foundry Agent Tracing
+# =============================================================================
+
+resource "azurerm_log_analytics_workspace" "main" {
+  name                = "law-${var.prefix}"
+  resource_group_name = azurerm_resource_group.main.name
+  location            = azurerm_resource_group.main.location
+  sku                 = "PerGB2018"
+  retention_in_days   = 30
+
+  tags = local.common_tags
+
+  lifecycle {
+    ignore_changes = [tags["RemoveAfter"]]
+  }
+}
+
+resource "azurerm_application_insights" "main" {
+  name                = "appi-${var.prefix}"
+  resource_group_name = azurerm_resource_group.main.name
+  location            = azurerm_resource_group.main.location
+  workspace_id        = azurerm_log_analytics_workspace.main.id
+  application_type    = "other"
+
+  tags = local.common_tags
+
+  lifecycle {
+    ignore_changes = [tags["RemoveAfter"]]
+  }
+}
+
+# Link AI Services to Application Insights for agent tracing
+resource "azurerm_monitor_diagnostic_setting" "ai_services" {
+  name                       = "ai-services-diagnostics"
+  target_resource_id         = azurerm_ai_services.main.id
+  log_analytics_workspace_id = azurerm_log_analytics_workspace.main.id
+
+  enabled_log {
+    category = "Audit"
   }
 
-  depends_on = [azapi_update_resource.ai_services_project_management]
+  enabled_log {
+    category = "RequestResponse"
+  }
+
+  enabled_log {
+    category = "Trace"
+  }
+
+  enabled_metric {
+    category = "AllMetrics"
+  }
+}
+
+# Export Application Insights traces to Blob Storage for notebook ingestion
+# Creates the insights-logs-appdependencies container automatically
+resource "azurerm_monitor_diagnostic_setting" "appi_to_storage" {
+  name               = "appi-to-storage"
+  target_resource_id = azurerm_application_insights.main.id
+  storage_account_id = azurerm_storage_account.unity.id
+
+  enabled_log {
+    category = "AppDependencies"
+  }
+
+  enabled_log {
+    category = "AppEvents"
+  }
+
+  enabled_log {
+    category = "AppExceptions"
+  }
+
+  enabled_log {
+    category = "AppRequests"
+  }
+
+  enabled_log {
+    category = "AppTraces"
+  }
+
+  depends_on = [azurerm_storage_account.unity]
 }
 
 # =============================================================================
@@ -212,8 +320,10 @@ resource "azurerm_storage_account" "unity" {
   is_hns_enabled                = true # Required for ADLS Gen2
   allow_nested_items_to_be_public = false
 
-  tags = {
-    purpose = "unity-catalog-storage"
+  tags = local.common_tags
+
+  lifecycle {
+    ignore_changes = [tags["RemoveAfter"]]
   }
 }
 
@@ -232,8 +342,10 @@ resource "azurerm_databricks_access_connector" "unity" {
     type = "SystemAssigned"
   }
 
-  tags = {
-    purpose = "unity-catalog-access"
+  tags = local.common_tags
+
+  lifecycle {
+    ignore_changes = [tags["RemoveAfter"]]
   }
 }
 
@@ -278,6 +390,21 @@ resource "databricks_external_location" "catalog" {
   provider        = databricks.workspace
   name            = "${var.prefix}-catalog-location"
   url             = "abfss://${azurerm_storage_container.catalog.name}@${azurerm_storage_account.unity.name}.dfs.core.windows.net/"
+  credential_name = databricks_storage_credential.unity[0].name
+
+  depends_on = [databricks_storage_credential.unity]
+
+  lifecycle {
+    replace_triggered_by = [azurerm_databricks_workspace.main.id]
+  }
+}
+
+# External Location for App Insights trace exports (read by MLflow notebook)
+resource "databricks_external_location" "insights" {
+  count           = var.deploy_uc ? 1 : 0
+  provider        = databricks.workspace
+  name            = "${var.prefix}-insights-location"
+  url             = "abfss://insights-logs-appdependencies@${azurerm_storage_account.unity.name}.dfs.core.windows.net/"
   credential_name = databricks_storage_credential.unity[0].name
 
   depends_on = [databricks_storage_credential.unity]
@@ -404,8 +531,8 @@ resource "databricks_secret" "foundry_client_secret" {
 resource "databricks_catalog" "mcp_agents" {
   count         = var.deploy_uc ? 1 : 0
   provider      = databricks.workspace
-  name          = "mcp_agents"
-  storage_root  = "abfss://${azurerm_storage_container.catalog.name}@${azurerm_storage_account.unity.name}.dfs.core.windows.net/mcp_agents"
+  name          = var.uc_catalog
+  storage_root  = "abfss://${azurerm_storage_container.catalog.name}@${azurerm_storage_account.unity.name}.dfs.core.windows.net/${var.uc_catalog}"
   comment       = "Catalog for MCP agent tools - wraps external agents as UC Functions"
   force_destroy = true
 
@@ -420,7 +547,7 @@ resource "databricks_schema" "tools" {
   count         = var.deploy_uc ? 1 : 0
   provider      = databricks.workspace
   catalog_name  = databricks_catalog.mcp_agents[0].name
-  name          = "tools"
+  name          = var.uc_schema
   comment       = "UC Functions exposed as MCP tools via Databricks managed MCP servers"
   force_destroy = true
 
@@ -526,6 +653,28 @@ output "service_principal_id" {
 output "service_principal_name" {
   description = "Service Principal display name"
   value       = var.deploy_uc ? databricks_service_principal.agent_caller[0].display_name : null
+}
+
+output "application_insights_connection_string" {
+  description = "Application Insights connection string for agent tracing"
+  value       = azurerm_application_insights.main.connection_string
+  sensitive   = true
+}
+
+output "application_insights_instrumentation_key" {
+  description = "Application Insights instrumentation key"
+  value       = azurerm_application_insights.main.instrumentation_key
+  sensitive   = true
+}
+
+output "application_insights_app_id" {
+  description = "Application Insights application ID for querying"
+  value       = azurerm_application_insights.main.app_id
+}
+
+output "log_analytics_workspace_id" {
+  description = "Log Analytics workspace ID"
+  value       = azurerm_log_analytics_workspace.main.workspace_id
 }
 
 # Instructions for next steps
