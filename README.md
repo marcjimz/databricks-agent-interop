@@ -727,15 +727,6 @@ The notebook (`register_uc_functions.py`) handles steps 4-5 automatically after 
 
 ---
 
-## Known Limitations
-
-| Limitation | Description | Status |
-|------------|-------------|--------|
-| **OAuth token generation in notebooks** | Notebooks cannot programmatically generate OAuth secrets for Service Principals. Secrets must be created via Terraform/CLI. | Tracked internally |
-| **HTTP Connections block U2M** | UC HTTP Connections using `http_request()` in SQL do not support User-to-Machine (U2M) authentication, per user. You must use the Python WorkspaceClient() HTTP_Request equivalent. | Platform restriction |
-
----
-
 ## References
 
 - [Databricks Managed MCP](https://docs.databricks.com/aws/en/generative-ai/mcp/managed-mcp)
