@@ -1,7 +1,7 @@
 # Databricks Agent Interoperability Framework
 # MCP + Unity Catalog
 
-.PHONY: help setup check-deps check-env deploy-infra deploy-uc destroy-infra deploy-bundle deploy-apps deploy-app-code start-apps wait-for-deployment update-agent-env grant-sp-permission create-sp-secret deploy-foundry-agent delete-foundry-agent setup-foundry-oauth check-foundry-oauth deploy-mcp-agent delete-mcp-agent test-mcp-local install unit-test lint format clean clean-bundle-state outputs sync-tf-state
+.PHONY: help setup check-deps check-env deploy-infra deploy-uc destroy-infra deploy-bundle deploy-apps deploy-app-code start-apps wait-for-deployment update-agent-env grant-sp-permission create-sp-secret deploy-foundry-agent delete-foundry-agent setup-foundry-oauth check-foundry-oauth deploy-mcp-agent delete-mcp-agent test-mcp-local install unit-test lint format clean clean-bundle-state outputs sync-tf-state run-traces-pipeline
 
 # Load environment variables from .env
 ifneq (,$(wildcard .env))
@@ -38,6 +38,9 @@ help:
 	@echo "  make deploy-mcp-agent     Deploy MCP-enabled agent to Foundry portal"
 	@echo "  make delete-mcp-agent     Delete MCP-enabled agent from Foundry portal"
 	@echo "  make test-mcp-local       Test MCP connection locally"
+	@echo ""
+	@echo "=== Traces Pipeline ==="
+	@echo "  make run-traces-pipeline  Run pipeline (bronze → silver → gold → MLflow upload)"
 	@echo ""
 	@echo "=== Development ==="
 	@echo "  make setup                Create .env from template"
@@ -238,7 +241,7 @@ update-env-from-terraform:
 
 deploy-bundle: check-databricks
 	@echo "=== Step 1: Deploying bundle to workspace ==="
-	databricks bundle deploy --var="catalog=$(UC_CATALOG)" --var="schema=$(UC_SCHEMA)"
+	databricks bundle deploy --var="catalog=$(UC_CATALOG)" --var="schema=$(UC_SCHEMA)" --var="prefix=$(PREFIX)" --var="subscription_id=$(SUBSCRIPTION_ID)" --var="resource_group=$(RESOURCE_GROUP)"
 	@echo ""
 	@echo "=== Step 2: Starting apps ==="
 	@$(MAKE) start-apps
@@ -247,7 +250,7 @@ deploy-bundle: check-databricks
 	@$(MAKE) update-agent-env
 	@echo ""
 	@echo "=== Step 4: Re-syncing bundle with agent URLs ==="
-	databricks bundle deploy --var="catalog=$(UC_CATALOG)" --var="schema=$(UC_SCHEMA)"
+	databricks bundle deploy --var="catalog=$(UC_CATALOG)" --var="schema=$(UC_SCHEMA)" --var="prefix=$(PREFIX)" --var="subscription_id=$(SUBSCRIPTION_ID)" --var="resource_group=$(RESOURCE_GROUP)"
 	@echo ""
 	@echo "=== Step 5: Granting SP permission on app ==="
 	@$(MAKE) grant-sp-permission
@@ -258,7 +261,7 @@ deploy-bundle: check-databricks
 
 deploy-apps: check-databricks
 	@echo "Deploying agents as Databricks Apps..."
-	databricks bundle deploy --var="catalog=$(UC_CATALOG)" --var="schema=$(UC_SCHEMA)"
+	databricks bundle deploy --var="catalog=$(UC_CATALOG)" --var="schema=$(UC_SCHEMA)" --var="prefix=$(PREFIX)" --var="subscription_id=$(SUBSCRIPTION_ID)" --var="resource_group=$(RESOURCE_GROUP)"
 	@echo ""
 	@echo "=== Apps Deployed ==="
 	@$(MAKE) start-apps
@@ -471,6 +474,23 @@ setup-foundry-oauth: check-env
 check-foundry-oauth: check-env
 	@echo "=== Checking Foundry OAuth Connection Status ==="
 	python foundry/setup_oauth_connection.py --status
+
+# =============================================================================
+# Traces Pipeline
+# =============================================================================
+
+run-traces-pipeline: check-databricks
+	@echo "=== Starting Agent Traces SDP Pipeline ==="
+	@PIPELINE_ID=$$(databricks pipelines list --output json 2>/dev/null | jq -r '.[] | select(.name == "Agent Traces SDP" or .name == "[dev $(USER)] Agent Traces SDP") | .pipeline_id' | head -1) && \
+	if [ -z "$$PIPELINE_ID" ]; then \
+		echo "Error: Pipeline 'Agent Traces SDP' not found. Run 'make deploy-bundle' first."; \
+		exit 1; \
+	fi && \
+	echo "Pipeline ID: $$PIPELINE_ID" && \
+	databricks pipelines start-update $$PIPELINE_ID --full-refresh && \
+	echo "" && \
+	echo "Pipeline started (includes MLflow trace upload as final stage)." && \
+	echo "Monitor at: $(DATABRICKS_HOST)/#joblist/pipelines/$$PIPELINE_ID"
 
 # =============================================================================
 # Development
