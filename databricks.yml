@@ -8,6 +8,12 @@ variables:
   schema:
     description: "Schema for MCP tool functions"
     default: "tools"
+  prefix:
+    description: "Infrastructure naming prefix"
+  subscription_id:
+    description: "Azure subscription ID"
+  resource_group:
+    description: "Azure resource group name"
 
 workspace:
   root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
@@ -16,6 +22,7 @@ sync:
   include:
     - notebooks/*.py
     - notebooks/.env
+    - src/pipelines/*.py
 
 resources:
   apps:
@@ -26,6 +33,26 @@ resources:
       permissions:
         - level: CAN_MANAGE
           user_name: ${workspace.current_user.userName}
+
+  pipelines:
+    agent_traces_pipeline:
+      name: "Agent Traces SDP"
+      target: "traces"
+      catalog: "${var.catalog}"
+      libraries:
+        - notebook:
+            path: ./src/pipelines/agent_traces_pipeline.py
+      clusters:
+        - label: default
+          num_workers: 1
+      configuration:
+        catalog: "${var.catalog}"
+        prefix: "${var.prefix}"
+        subscription_id: "${var.subscription_id}"
+        resource_group: "${var.resource_group}"
+      channel: PREVIEW
+      development: true
+      continuous: false
 
 targets:
   dev:
