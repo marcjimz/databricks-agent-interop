@@ -491,11 +491,12 @@ resource "azuread_service_principal_password" "foundry_caller" {
   service_principal_id = azuread_service_principal.foundry_caller[0].id
 }
 
-# Grant SP "Cognitive Services User" role on AI Services
+# Grant SP "Azure AI User" role on AI Services
+# Includes Microsoft.CognitiveServices/* data actions (covers Agents API threads/runs)
 resource "azurerm_role_assignment" "foundry_caller_cognitive" {
   count                = var.deploy_uc ? 1 : 0
   scope                = azurerm_ai_services.main.id
-  role_definition_name = "Cognitive Services User"
+  role_definition_name = "Azure AI User"
   principal_id         = azuread_service_principal.foundry_caller[0].object_id
 }
 
@@ -653,6 +654,16 @@ output "service_principal_id" {
 output "service_principal_name" {
   description = "Service Principal display name"
   value       = var.deploy_uc ? databricks_service_principal.agent_caller[0].display_name : null
+}
+
+output "foundry_sp_object_id" {
+  description = "Foundry caller Service Principal object ID (for RBAC)"
+  value       = var.deploy_uc ? azuread_service_principal.foundry_caller[0].object_id : null
+}
+
+output "ai_services_id" {
+  description = "AI Services resource ID (RBAC scope for Foundry agent)"
+  value       = azurerm_ai_services.main.id
 }
 
 output "application_insights_connection_string" {

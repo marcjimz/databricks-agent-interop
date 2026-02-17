@@ -132,6 +132,21 @@ deploy-uc: check-env check-databricks sync-tf-state
 		-var="uc_schema=$(UC_SCHEMA)" \
 		-var="deploy_uc=true"
 	@echo ""
+	@echo "=== Granting Foundry SP 'Azure AI User' role ==="
+	@FOUNDRY_SP_OID=$$(cd infra && terraform output -raw foundry_sp_object_id 2>/dev/null) && \
+	AI_SERVICES_ID=$$(cd infra && terraform output -raw ai_services_id 2>/dev/null) && \
+	if [ -n "$$FOUNDRY_SP_OID" ] && [ -n "$$AI_SERVICES_ID" ]; then \
+		echo "SP Object ID: $$FOUNDRY_SP_OID" && \
+		echo "Scope: $$AI_SERVICES_ID" && \
+		az role assignment create \
+			--role "Azure AI User" \
+			--assignee-object-id "$$FOUNDRY_SP_OID" \
+			--assignee-principal-type ServicePrincipal \
+			--scope "$$AI_SERVICES_ID" 2>/dev/null || echo "Role already assigned or assignment in progress"; \
+	else \
+		echo "Warning: Could not get Foundry SP or AI Services ID from terraform outputs."; \
+	fi
+	@echo ""
 	@echo "=== Creating OAuth Secret for Service Principal ==="
 	@cd infra && ./create-sp-secret.sh
 	@echo ""
@@ -233,6 +248,9 @@ deploy-bundle: check-databricks
 	@echo ""
 	@echo "=== Step 4: Re-syncing bundle with agent URLs ==="
 	databricks bundle deploy --var="catalog=$(UC_CATALOG)" --var="schema=$(UC_SCHEMA)"
+	@echo ""
+	@echo "=== Step 5: Granting SP permission on app ==="
+	@$(MAKE) grant-sp-permission
 	@echo ""
 	@echo "=== Bundle Deployment Complete ==="
 	@echo "Agent URLs:"
