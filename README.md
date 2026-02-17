@@ -203,6 +203,7 @@ The notebook registers:
 | `calculator_agent` | Calls the Calculator Agent (Databricks App) via MLflow `/invocations` endpoint |
 | `foundry_agent` | Calls a real Azure AI Foundry Agent via the Agents API (threads, runs, messages) |
 | `epic_patient_search` | FHIR Patient search stub (simulates Epic Sandbox API) |
+| `detect_phi` | HIPAA Safe Harbor PHI detection using regex (18 identifier types) |
 
 ### Verify Registration
 
@@ -384,6 +385,30 @@ WHERE function_catalog = 'mcp_agents'
 ### Test Denied Access
 
 A user without EXECUTE permission receives `403 Forbidden`.
+
+---
+
+## Agent Traces Pipeline (SDP)
+
+A **Spark Declarative Pipelines** streaming pipeline ingests agent traces, normalizes them into OTEL-compatible spans, and uploads to MLflow for visualization.
+
+```
+foundry_traces_raw ──────→ foundry_spans ──────────┐
+salesforce_traces_raw ───→ salesforce_spans ────────┤
+copilot_studio_traces_raw → copilot_studio_spans ──┤→ all_spans → agent_conversations → mlflow_trace_uploads
+servicenow_traces_raw ───→ servicenow_spans ───────┘
+```
+
+- **Bronze:** Raw trace ingestion from 4 sources (Foundry via AutoLoader streaming, Salesforce/Copilot Studio/ServiceNow as stubs)
+- **Silver:** Normalized OTEL spans with consistent schema across all sources
+- **Gold:** Aggregated conversations + automatic upload to MLflow experiment `/Shared/Agent traces`
+- **Note:** Only the Azure AI Foundry path is fully implemented. Salesforce, Copilot Studio, and ServiceNow sources are stub placeholders with sample data to demonstrate the multi-source DAG.
+
+```bash
+# Deploy the pipeline and run it
+make deploy-bundle
+make run-traces-pipeline
+```
 
 ---
 
@@ -680,11 +705,13 @@ For detailed setup, see the [Agent Bricks documentation](https://docs.databricks
 │   ├── agents/
 │   │   ├── databricks/           # Databricks agents using MCP tools
 │   │   └── foundry/              # Foundry MCP integration
-│   └── mcp/
-│       └── functions/            # UC Function definitions
+│   ├── mcp/
+│   │   └── functions/            # UC Function definitions
+│   └── pipelines/
+│       └── agent_traces_pipeline.py  # SDP pipeline: bronze → silver → gold → MLflow (Foundry real + 3 stubs)
 ├── notebooks/
 │   ├── register_uc_functions.py  # Register UC Functions (wrappers for agents)
-│   └── foundry_traces_to_mlflow.py  # Import App Insights telemetry from Azure AI Foundry into MLflow traces (manual setup, not automated)
+│   └── foundry_traces_to_mlflow.py  # Import App Insights telemetry into MLflow traces (standalone, pre-pipeline)
 ├── infra/
 │   ├── main.tf                   # Azure Databricks + AI Foundry
 │   └── Makefile
@@ -707,6 +734,7 @@ For detailed setup, see the [Agent Bricks documentation](https://docs.databricks
 | `make deploy-apps` | Deploy/redeploy agents as Databricks Apps |
 | `make create-sp-secret` | Create OAuth secret for Service Principal |
 | `make grant-sp-permission` | Grant SP permission on apps |
+| `make run-traces-pipeline` | Run Agent Traces SDP pipeline (bronze → silver → gold → MLflow upload) |
 | `make destroy-infra` | Destroy Azure infrastructure |
 | `make clean-bundle-state` | Clean Databricks bundle state (fixes stale state issues) |
 
